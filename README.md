@@ -13,7 +13,9 @@ afm_obj.run_frida_server()
 ## API
 
 ```python
-install_frida_server()
-run_frida_server
-...
+install_frida_server(version="latest")
+run_frida_server()
+is_frida_server_running()
+stop_frida_server()
+remove_frida_server()
 ```
