@@ -17,11 +17,15 @@ import tempfile
 
 class FridaAndroidManager():
 
-    def __init__(self, install_latest_frida_server=False ,verbose=False):
+    def __init__(self, is_remote=False, socket="", verbose=False):
+        self.is_remote = is_remote
+        self.device_socket = socket
         self.verbose = verbose
-        self.install_latest_frida_server = install_latest_frida_server
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
+
+        if self.is_remote:
+            frida.get_device_manager().add_remote_device(self.socket)
 
 
     def _setup_logging(self):
@@ -143,7 +147,10 @@ class FridaAndroidManager():
     
 
     def _get_android_device_arch(self):
-        frida_usb_json_data = frida.get_usb_device().query_system_parameters()
+        if self.is_remote:
+            frida_usb_json_data = frida.get_remote_device().query_system_parameters() 
+        else:
+            frida_usb_json_data = frida.get_usb_device().query_system_parameters()
         return frida_usb_json_data['arch']
     
     

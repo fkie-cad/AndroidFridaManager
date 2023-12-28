@@ -5,7 +5,7 @@ A python API in order to install and run the frida-server on an Android device. 
 ## Usage
 
 ```python
-afm_obj = FridaAndroidManager()
+afm_obj = FridaAndroidManager(is_remote=False, socket="ip:port", verbose=False)
 afm_obj.install_frida_server()
 afm_obj.run_frida_server()
 ```
