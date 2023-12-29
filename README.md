@@ -2,9 +2,18 @@
 
 A python API in order to install and run the frida-server on an Android device. The project was inspired by [Frida-Python-Binding](https://github.com/Mind0xP/Frida-Python-Binding/tree/master).
 
+## Install
+
+Just install it via pip:
+```bash
+pip install AndroidFridaManager
+```
+
 ## Usage
 
 ```python
+import AndroidFridaManager
+
 afm_obj = FridaAndroidManager(is_remote=False, socket="ip:port", verbose=False, frida_install_dst="/data/local/tmp/")
 afm_obj.install_frida_server()
 afm_obj.run_frida_server()

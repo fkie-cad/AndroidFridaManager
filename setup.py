@@ -2,7 +2,7 @@ import os
 from setuptools import setup, find_packages
 from os.path import abspath, dirname, join
 
-__version__ = 0.2
+__version__ = 0.3
 __author__ = "Daniel Baier"
 
 # Fetches the content from README.md
@@ -49,7 +49,7 @@ setup(
 
 
 
-    include_package_data=False,
+    include_package_data=True,
     python_requires='>=3.6',
     #packages=find_packages(),
     install_requires=requirements,
