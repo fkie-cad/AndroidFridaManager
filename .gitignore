@@ -1,3 +1,4 @@
 dist/
 AndroidFridaManager.egg-info/
 build/
+__pycache__/

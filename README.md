@@ -13,7 +13,7 @@ pip install AndroidFridaManager
 
 ```python
 from AndroidFridaManager import FridaManager
-
+...
 afm_obj = FridaManager(is_remote=False, socket="ip:port", verbose=False, frida_install_dst="/data/local/tmp/")
 afm_obj.install_frida_server()
 afm_obj.run_frida_server()
