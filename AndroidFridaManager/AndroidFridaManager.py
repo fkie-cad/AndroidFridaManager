@@ -18,6 +18,19 @@ import tempfile
 class FridaManager():
 
     def __init__(self, is_remote=False, socket="", verbose=False, frida_install_dst="/data/local/tmp/"):
+        """
+        Constructor of the current FridaManager instance
+
+        :param is_remote: The number to multiply.
+        :type number: bool
+        :param socket: The socket to connect to the remote device. The remote device needs to be set by <ip:port>. By default this string will be empty in order to indicate that FridaManger is working with the first connected USB device.
+        :type number: string
+        :param verbose: Set the output to verbose, so that the logging information gets printed. By default set to False.
+        :type number: bool
+        :param frida_install_dst: The path where the frida server should be installed. By default it will be installed to /data/local/tmp/.
+        :type number: bool
+
+        """
         self.is_remote = is_remote
         self.device_socket = socket
         self.verbose = verbose
@@ -31,6 +44,10 @@ class FridaManager():
 
 
     def _setup_logging(self):
+        """
+        Setup logging for the current instance of FridaManager 
+
+        """
         logger = logging.getLogger()
         logger.setLevel(logging.INFO)
         color_formatter = ColoredFormatter(
@@ -68,6 +85,13 @@ class FridaManager():
 
 
     def is_frida_server_running(self):
+        """
+        Checks if on the connected device a frida server is running. 
+        The test is done by the Android system command pidof and is looking for the string frida-server.
+
+        :return: True if a frida-server is running otherwise False.
+        :rtype: bool
+        """
         result = self.run_adb_command_as_root("/system/bin/pidof frida-server")
         if len(result.stdout) > 1:
             return True
@@ -89,15 +113,28 @@ class FridaManager():
         self._adb_remove_file_if_exist(cmd)
 
 
-    def install_frida_server(self,dst_dir="/data/local/tmp/"):
+    def install_frida_server(self, dst_dir="/data/local/tmp/", version="latest"):
+        """
+        Install the frida server binary on the Android device. 
+        This includes downloading the frida-server, decompress it and pushing it to the Android device.
+        By default it is pushed into the /data/local/tmp/ directory.
+        Further the binary will be set to executable in order to run it.
+
+        :param dst_dir: The destination folder where the frida-server binary should be installed (pushed). 
+        :type number: string
+        :param version: The version. By default the latest version will be used.
+        :type number: string
+
+        """
         if dst_dir is self.install_frida_server.__defaults__[0]:
             frida_dir = self.frida_install_dst
         else:
             frida_dir = dst_dir
 
         with tempfile.TemporaryDirectory() as dir:
-            self.logger.info(f"[*] downloading frida-server to {dir}")
-            file_path = self.download_frida_server(dir)
+            if self.verbose:
+                self.logger.info(f"[*] downloading frida-server to {dir}")
+            file_path = self.download_frida_server(dir,version)
             tmp_frida_server = self.extract_frida_server_comp(file_path)
             # ensure's that we always overwrite the current installation with our recent downloaded version
             self._adb_remove_file_if_exist(frida_dir + "frida-server")
@@ -107,18 +144,32 @@ class FridaManager():
 
     # by default the latest frida-server version will be downloaded
     def download_frida_server(self, path, version="latest"):
+        """
+        Downloads a frida server. By default the latest version is used.
+        If you want to download a specific version you have to provide it trough the version parameter.
+
+        :param path: The path where the compressed frida-server should be downloded.
+        :type number: string
+        :param version: The version. By default the latest version will be used.
+        :type number: string
+
+        :return: The location of the downloaded frida server in its compressed form.
+        :rtype: string
+        """
         url = self.get_frida_server_for_android_url(version)
         with open(path+"/frida-server","wb") as fsb:
             res = requests.get(url)
             fsb.write(res.content)
-            self.logger.info(f"[*] writing frida-server to {path}")
+            if self.verbose:
+                self.logger.info(f"[*] writing frida-server to {path}")
 
         return path+"/frida-server"
 
 
 
     def extract_frida_server_comp(self, file_path):
-        self.logger.info(f"[*] extracting {file_path} ...")
+        if self.verbose:
+            self.logger.info(f"[*] extracting {file_path} ...")
         # create a subdir for the specified filename
         frida_server_dir = file_path[:-3]
         os.makedirs(frida_server_dir)
@@ -153,19 +204,22 @@ class FridaManager():
 
     def _get_frida_server_donwload_url(self, arch, version):
         frida_download_prefix = "https://github.com/frida/frida/releases"
-        url = "https://api.github.com/repos/frida/frida/releases/"+version
-        try:
-            res = requests.get(url)
-        except requests.exceptions.TooManyRedirects:
-            # invalid version therfore set to latest 
-            url = "https://api.github.com/repos/frida/frida/releases/latest"
-            res = requests(url)
-        except requests.exceptions.RequestException as e:
-            print("[-] error in doing requests: "+e)
-            exit(2)
 
-        frida_server_path = re.findall(r'\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-'+arch+'\.xz',res.text)
-        final_url = frida_download_prefix + frida_server_path[0]
+        if version is "latest":
+            url = "https://api.github.com/repos/frida/frida/releases/"+version
+        
+            try:
+                res = requests.get(url)
+            except requests.exceptions.RequestException as e:
+                print("[-] error in doing requests: "+e)
+                exit(2)
+
+            frida_server_path = re.findall(r'\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-'+arch+'\.xz',res.text)
+            final_url = frida_download_prefix + frida_server_path[0]
+
+        else:
+            final_url = "https://github.com/frida/frida/releases/download/"+ version +"/frida-server-"+version+"-android-"+arch+".xz"
+
 
         if self.verbose:
             print(f"[*] frida-server download url: {final_url}")

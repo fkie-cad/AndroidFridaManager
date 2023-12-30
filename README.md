@@ -22,7 +22,7 @@ afm_obj.run_frida_server()
 ## API
 
 ```python
-install_frida_server(version="latest")
+install_frida_server(dst_dir="/data/local/tmp/", version="latest")
 run_frida_server()
 is_frida_server_running()
 stop_frida_server()
