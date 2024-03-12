@@ -2,7 +2,7 @@ import os
 from setuptools import setup, find_packages
 from os.path import abspath, dirname, join
 
-__version__ = 0.6
+__version__ = 0.8
 __author__ = "Daniel Baier"
 
 # Fetches the content from README.md
@@ -69,9 +69,9 @@ setup(
     # This field is OPTIONAL
     keywords=["mobile", "instrumentation", "frida", "hook", "android"],
 
-    #entry_points={
-    #        'console_scripts': [
-    #        'ammm=ammm:main',
-    #    ],
-    #},
+    entry_points={
+            'console_scripts': [
+                'afrim=AndroidFridaManager.FridaManger:main',
+        ],
+    },
 )

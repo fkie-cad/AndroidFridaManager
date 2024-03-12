@@ -9,7 +9,25 @@ Just install it via pip:
 pip install AndroidFridaManager
 ```
 
+This will install the `afrim`-command to your system.
+
 ## Usage
+
+In order to easily install the latest frida-server version to your Android device just run the following command:
+
+```bash
+$ afrim 
+```
+
+
+In order to check only if frida-server is running invoke it with the `-r`-parameter:
+
+```bash
+$ afrim -r
+```
+
+
+## API Usage
 
 ```python
 from AndroidFridaManager import FridaManager
@@ -18,6 +36,7 @@ afm_obj = FridaManager(is_remote=False, socket="ip:port", verbose=False, frida_i
 afm_obj.install_frida_server()
 afm_obj.run_frida_server()
 ```
+
 
 ## API
 

@@ -12,6 +12,7 @@ import lzma
 import re
 from shutil import copyfile
 import tempfile
+import argparse
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
@@ -296,10 +297,39 @@ class FridaManager():
         if self._adb_does_file_exist(path):
             output = self.run_adb_command_as_root("rm "+path)
 
-# only there in order to do some tests will be removed soon
-#if __name__ == "__main__":
-#    afm_obj = FridaManager()
-#    afm_obj.install_frida_server()
-#    result = afm_obj.is_frida_server_running()
-#    print(result)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        parser = argparse.ArgumentParser(description='FridaManager initialization parameters.')
+        
+        parser.add_argument('--is_remote', type=lambda x: (str(x).lower() == 'true'), default=False, help='Whether to use Frida in remote mode. Default is False.')
+        parser.add_argument('--socket', type=str, default="", help='Socket to use for the connection. Expected in the format <ip:port>.')
+        parser.add_argument('--verbose', action='store_true', default=False, help='Enable verbose output. Default is False.')
+        parser.add_argument('--frida_install_dst', type=str, default="/data/local/tmp/", help='Frida installation destination. Default is "/data/local/tmp/".')
+        parser.add_argument('-r','--is_running', type=bool, default=False, help='Checks only if frida-server is running on the Android device or not.')
+
+        args = parser.parse_args()
+
+        if args.is_running:
+            afm_obj = FridaManager()
+            if afm_obj.is_frida_server_running():
+                print("[*] frida-server is running on Android device")
+            else:
+                print("[*] frida-server is not running on Android device")
+
+            sys.exit()
+
+
+
+        afm_obj = FridaManager(args.is_remote, args.socket, args.verbose, args.frida_install_dst)
+    else:
+        afm_obj = FridaManager()
+
+    afm_obj.install_frida_server()
+    result = afm_obj.is_frida_server_running()
+    if result:
+        print("[*] succesfull installed and launched latest frida-server version on Android device")
+    else:
+        print("[-] unable to run frida-server on Android device")
 
