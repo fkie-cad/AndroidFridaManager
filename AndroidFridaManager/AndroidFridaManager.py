@@ -206,7 +206,7 @@ class FridaManager():
     def _get_frida_server_donwload_url(self, arch, version):
         frida_download_prefix = "https://github.com/frida/frida/releases"
 
-        if version is "latest":
+        if version == "latest":
             url = "https://api.github.com/repos/frida/frida/releases/"+version
         
             try:
@@ -298,16 +298,15 @@ class FridaManager():
             output = self.run_adb_command_as_root("rm "+path)
 
 
-
-if __name__ == "__main__":
+def main():
     if len(sys.argv) > 1:
         parser = argparse.ArgumentParser(description='FridaManager initialization parameters.')
         
         parser.add_argument('--is_remote', type=lambda x: (str(x).lower() == 'true'), default=False, help='Whether to use Frida in remote mode. Default is False.')
         parser.add_argument('--socket', type=str, default="", help='Socket to use for the connection. Expected in the format <ip:port>.')
-        parser.add_argument('--verbose', action='store_true', default=False, help='Enable verbose output. Default is False.')
+        parser.add_argument('--verbose', required=False, action="store_const", const=True, default=False, help='Enable verbose output. Default is False.')
         parser.add_argument('--frida_install_dst', type=str, default="/data/local/tmp/", help='Frida installation destination. Default is "/data/local/tmp/".')
-        parser.add_argument('-r','--is_running', type=bool, default=False, help='Checks only if frida-server is running on the Android device or not.')
+        parser.add_argument('-r','--is_running', required=False, action="store_const", const=True, default=False, help='Checks only if frida-server is running on the Android device or not.')
 
         args = parser.parse_args()
 
@@ -332,4 +331,8 @@ if __name__ == "__main__":
         print("[*] succesfull installed and launched latest frida-server version on Android device")
     else:
         print("[-] unable to run frida-server on Android device")
+
+
+if __name__ == "__main__":
+    main()
 

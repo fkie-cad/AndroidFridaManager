@@ -2,7 +2,8 @@ import os
 from setuptools import setup, find_packages
 from os.path import abspath, dirname, join
 
-__version__ = "0.8"
+from AndroidFridaManager.__init__ import __version__
+
 __author__ = "Daniel Baier"
 
 # Fetches the content from README.md
@@ -71,7 +72,7 @@ setup(
 
     entry_points={
             'console_scripts': [
-                'afrim=AndroidFridaManager.FridaManger:main',
+                'afrim=AndroidFridaManager.AndroidFridaManager:main',
         ],
     },
 )
