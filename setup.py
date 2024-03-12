@@ -2,7 +2,7 @@ import os
 from setuptools import setup, find_packages
 from os.path import abspath, dirname, join
 
-__version__ = 0.8
+__version__ = "0.8"
 __author__ = "Daniel Baier"
 
 # Fetches the content from README.md
@@ -37,7 +37,7 @@ setup(
 
     url="https://github.com/fkie-cad/AndroidFridaManager",
 
-    author_name=__author__,
+    author=__author__,
     author_email="daniel.baier@fkie.fraunhofer.de",
     license='GPL v3',
 
