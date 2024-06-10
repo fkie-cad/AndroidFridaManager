@@ -5,7 +5,7 @@ import atexit
 import subprocess
 import frida
 from typing import Optional, Dict, Union
-from job import Job, FridaBasedException
+from .job import Job, FridaBasedException
 import time
 import re
 

@@ -15,7 +15,7 @@ The project was inspired by [Frida-Python-Binding](https://github.com/Mind0xP/Fr
 
 Just install it via pip:
 ```bash
-pip install AndroidFridaManager
+python3 -m pip install AndroidFridaManager
 ```
 
 This will install the `afrim`-command to your system.

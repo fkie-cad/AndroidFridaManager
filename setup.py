@@ -2,8 +2,7 @@ import os
 from setuptools import setup, find_packages
 from os.path import abspath, dirname, join
 
-from AndroidFridaManager.__init__ import __version__
-
+__version__ = "1.6.6"
 __author__ = "Daniel Baier"
 
 # Fetches the content from README.md
