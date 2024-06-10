@@ -72,7 +72,7 @@ setup(
 
     entry_points={
             'console_scripts': [
-                'afrim=AndroidFridaManager.AndroidFridaManager:main',
+                'afrim=AndroidFridaManager.FridaManager:main',
         ],
     },
 )
