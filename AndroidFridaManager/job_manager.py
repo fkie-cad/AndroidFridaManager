@@ -30,6 +30,7 @@ class JobManager(object):
         self.enable_spawn_gating = enable_spawn_gating
         self.first_instrumenation_script = None
         self.last_created_job = None
+        self.init_last_job = False
         atexit.register(self.cleanup)
 
 
@@ -156,9 +157,46 @@ class JobManager(object):
             raise FridaBasedException(f"ProcessNotFoundError: {pe}")
         
     
+    def init_job(self,frida_script_name, custom_hooking_handler_name):
+        try:
+            if self.process_session:
+                job = Job(frida_script_name, custom_hooking_handler_name, self.process_session)
+                job.create_job_script()
+                self.init_last_job = True
+                print(f"[*] created job: {job.job_id}")
+                self.jobs[job.job_id] = job
+                self.last_created_job = job
+
+            else:
+                print("[-] no frida session. Aborting...")
+
+        except frida.TransportError as fe:
+            raise FridaBasedException(f"Problems while attaching to frida-server: {fe}")
+        except FridaBasedException as e:
+            raise FridaBasedException(f"Frida based error: {e}")
+        except frida.TimedOutError as te:
+            raise FridaBasedException(f"TimeOutError: {te}")
+        except frida.ProcessNotFoundError as pe:
+            raise FridaBasedException(f"ProcessNotFoundError: {pe}")
+
+
+    def run_last_created_job(self, custom_hooking_handler_name):
+        try:
+            if self.init_last_job:
+                self.last_created_job.run_job()
+                self.init_last_job = False
+                if self.is_first_job:
+                    self.is_first_job = False
+                    self.first_instrumenation_script = custom_hooking_handler_name
+                    if self.pid != -1:
+                        self.device.resume(self.pid)
+                        time.sleep(1) # without it Java.perform silently fails
+        except Exception as fe:
+            raise FridaBasedException(f"Frida-Error: {fe}")
+
+        
     def start_job(self,frida_script_name, custom_hooking_handler_name):
         try:
-
             if self.process_session:
                 job = Job(frida_script_name, custom_hooking_handler_name, self.process_session)
                 print(f"[*] created job: {job.job_id}")

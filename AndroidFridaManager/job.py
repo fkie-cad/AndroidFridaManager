@@ -20,8 +20,14 @@ class Job:
         self.stop_event = threading.Event()
         self.process_session = process
         self.thread = None
+        self.is_script_created = False
 
 
+    def create_job_script(self):
+        self.instrument(self.process_session)
+        self.is_script_created = True
+    
+    
     def run_job(self):
         #self.is_running_as_thread = True
         self.run_job_as_thread()
@@ -33,7 +39,9 @@ class Job:
 
 
     def invoke_handle_hooking(self):
-        self.instrument(self.process_session)
+        if self.is_script_created == False:
+            self.instrument(self.process_session)
+            self.is_script_created = True
         self.script.on("message", self.wrap_custom_hooking_handler_with_job_id(self.custom_hooking_handler))
         self.script.load()
         self.state = "running"
