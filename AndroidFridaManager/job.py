@@ -85,3 +85,7 @@ class Job:
 
     def get_id(self):
         return self.job_id
+
+
+    def get_script_of_job(self):
+        return self.script

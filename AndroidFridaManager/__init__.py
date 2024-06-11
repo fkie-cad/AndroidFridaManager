@@ -5,4 +5,4 @@ from .FridaManager import FridaManager, main
 from .job import Job, FridaBasedException
 from .job_manager import JobManager
 
-__version__ = "1.6.6"
+__version__ = "1.7.0"

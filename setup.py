@@ -2,7 +2,7 @@ import os
 from setuptools import setup, find_packages
 from os.path import abspath, dirname, join
 
-__version__ = "1.6.6"
+__version__ = "1.7.0"
 __author__ = "Daniel Baier"
 
 # Fetches the content from README.md

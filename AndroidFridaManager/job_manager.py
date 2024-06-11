@@ -29,6 +29,7 @@ class JobManager(object):
         self.package_name = ""
         self.enable_spawn_gating = enable_spawn_gating
         self.first_instrumenation_script = None
+        self.last_created_job = None
         atexit.register(self.cleanup)
 
 
@@ -162,6 +163,7 @@ class JobManager(object):
                 job = Job(frida_script_name, custom_hooking_handler_name, self.process_session)
                 print(f"[*] created job: {job.job_id}")
                 self.jobs[job.job_id] = job
+                self.last_created_job = job
                 job.run_job()
                 if self.is_first_job:
                     self.is_first_job = False
@@ -202,6 +204,18 @@ class JobManager(object):
             job = self.jobs[job_id]
             job.close_job()
             del self.jobs[job_id]
+
+
+    def get_last_created_job(self):
+        if self.last_created_job:
+            return self.last_created_job
+
+
+    def get_job_by_id(self, job_id):
+        if job_id in self.jobs:
+            return self.jobs[job_id]
+        else:
+            raise ValueError(f"Job mit ID {job_id} nicht gefunden.")
 
 
     def detach_from_app(self):
