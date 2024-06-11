@@ -58,7 +58,7 @@ class Job:
         def wrapped_handler(message, data):
             # Add job_id to the message
             message['job_id'] = self.job_id
-            handler(message, data)
+            handler(self, message, data)
 
         return wrapped_handler
 
