@@ -6,7 +6,7 @@ from os.path import abspath, dirname, join
 here = os.path.abspath(os.path.dirname(__file__))
 
 # Path to the about.py file
-about_py_path = join(here, "src", "AndroidFridaManager", "about.py")
+about_py_path = join(here, "AndroidFridaManager", "about.py")
 
 # Read version and author from about.py
 with open(about_py_path) as f:
