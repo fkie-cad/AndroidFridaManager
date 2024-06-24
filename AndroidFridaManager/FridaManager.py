@@ -191,6 +191,7 @@ class FridaManager():
 
     def get_frida_server_for_android_url(self, version):
         arch = self._get_android_device_arch()
+
         if self.verbose:
             self.logger.info(f"[*] Android architecture: {arch}")
         arch_str = "x86"
@@ -202,7 +203,7 @@ class FridaManager():
         elif arch == "ia32":
             arch_str = "x86"
         elif arch == "x64":
-            arch_str == "x86_64"
+            arch_str = "x86_64"
         else:
             arch_str = "x86"
 
