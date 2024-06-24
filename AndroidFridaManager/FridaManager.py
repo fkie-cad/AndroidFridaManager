@@ -10,9 +10,12 @@ import subprocess
 import requests
 import lzma
 import re
+import warnings
 from shutil import copyfile
 import tempfile
 import argparse
+
+warnings.filterwarnings("error")
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
@@ -179,6 +182,9 @@ class FridaManager():
         with open(frida_server_dir+'/frida-server', 'wb') as f:
             f.write(decompressed_file)
 
+        if self.verbose:
+            self.logger.info(f"[*] installed frida-server to: {frida_server_dir}")
+
         # del compressed file
         os.remove(file_path)
         return frida_server_dir+"/frida-server"
@@ -187,7 +193,7 @@ class FridaManager():
     def get_frida_server_for_android_url(self, version):
         arch = self._get_android_device_arch()
         if self.verbose:
-            print(f"[*] Android architecture: {arch}")
+            self.logger.info(f"[*] Android architecture: {arch}")
         arch_str = "x86"
 
         if arch == "arm64":
@@ -202,7 +208,7 @@ class FridaManager():
             arch_str = "x86"
 
         if self.verbose:
-            print(f"[*] Android architecture string: {arch_str}")
+            self.logger.info(f"[*] Android architecture string: {arch_str}")
 
         download_url = self._get_frida_server_donwload_url(arch_str,version)
         return download_url
@@ -217,10 +223,14 @@ class FridaManager():
             try:
                 res = requests.get(url)
             except requests.exceptions.RequestException as e:
-                print("[-] error in doing requests: "+e)
+                self.logger.error("[-] error in doing requests: "+e)
                 exit(2)
+            
+            try:
+                frida_server_path = re.findall(r'\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-'+arch+'\.xz',res.text)
+            except SyntaxWarning:
+                frida_server_path = re.findall(r'/download/\d+\.\d+\.\d+/frida-server-\d+\.\d+\.\d+-android-' + arch + r'\.xz', res.text)
 
-            frida_server_path = re.findall(r'\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-'+arch+'\.xz',res.text)
             final_url = frida_download_prefix + frida_server_path[0]
 
         else:
@@ -228,7 +238,7 @@ class FridaManager():
 
 
         if self.verbose:
-            print(f"[*] frida-server download url: {final_url}")
+            self.logger.info(f"[*] frida-server download url: {final_url}")
 
         return final_url
 
@@ -248,7 +258,7 @@ class FridaManager():
 
     def run_adb_command_as_root(self,command):
         if self.adb_check_root() == False:
-            print("[-] none rooted device. Please root it before using FridaAndroidManager and ensure that you are able to run commands with the su-binary....")
+            self.logger.error("[-] none rooted device. Please root it before using FridaAndroidManager and ensure that you are able to run commands with the su-binary....")
             exit(2)
 
         if self.is_magisk_mode:
