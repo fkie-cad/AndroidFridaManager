@@ -142,6 +142,8 @@ class FridaManager():
             tmp_frida_server = self.extract_frida_server_comp(file_path)
             # ensure's that we always overwrite the current installation with our recent downloaded version
             self._adb_remove_file_if_exist(frida_dir + "frida-server")
+            if self.verbose:
+                self.logger.info(f"[*] pushing frida-server to {frida_dir}")
             self._adb_push_file(tmp_frida_server,frida_dir)
             self.make_frida_server_executable()
 
@@ -181,9 +183,6 @@ class FridaManager():
             decompressed_file = f.read()
         with open(frida_server_dir+'/frida-server', 'wb') as f:
             f.write(decompressed_file)
-
-        if self.verbose:
-            self.logger.info(f"[*] installed frida-server to: {frida_server_dir}")
 
         # del compressed file
         os.remove(file_path)
@@ -248,6 +247,10 @@ class FridaManager():
             cmd = self.frida_install_dst + "frida-server"
         else:
             cmd = frida_server_path + "frida-server"
+
+        final_cmd = "chmod +x "+cmd
+        if self.verbose:
+                self.logger.info(f"[*] making frida-server executable: {final_cmd}")
 
         self.run_adb_command_as_root(f"chmod +x {cmd}")
  
