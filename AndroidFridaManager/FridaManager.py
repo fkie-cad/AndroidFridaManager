@@ -50,26 +50,28 @@ class FridaManager():
     def _setup_logging(self):
         """
         Setup logging for the current instance of FridaManager 
-
         """
         logger = logging.getLogger()
-        logger.setLevel(logging.INFO)
-        color_formatter = ColoredFormatter(
-                "%(log_color)s[%(asctime)s] [%(levelname)-4s]%(reset)s - %(message)s",
-                datefmt='%d-%m-%y %H:%M:%S',
-                reset=True,
-                log_colors={
-                    'DEBUG':    'cyan',
-                    'INFO':     'green',
-                    'WARNING':  'bold_yellow',
-                    'ERROR':    'bold_red',
-                    'CRITICAL': 'bold_red',
-                },
-                secondary_log_colors={},
-                style='%')
-        logging_handler = logging.StreamHandler()
-        logging_handler.setFormatter(color_formatter)
-        logger.addHandler(logging_handler)
+        
+        # Check if the logger already has handlers (i.e., if another project has set it up)
+        if not logger.handlers:
+            logger.setLevel(logging.INFO)
+            color_formatter = ColoredFormatter(
+                    "%(log_color)s[%(asctime)s] [%(levelname)-4s]%(reset)s - %(message)s",
+                    datefmt='%d-%m-%y %H:%M:%S',
+                    reset=True,
+                    log_colors={
+                        'DEBUG':    'cyan',
+                        'INFO':     'green',
+                        'WARNING':  'bold_yellow',
+                        'ERROR':    'bold_red',
+                        'CRITICAL': 'bold_red',
+                    },
+                    secondary_log_colors={},
+                    style='%')
+            logging_handler = logging.StreamHandler()
+            logging_handler.setFormatter(color_formatter)
+            logger.addHandler(logging_handler)
 
 
 
