@@ -209,9 +209,12 @@ class JobManager(object):
                     if self.pid != -1:
                         self.device.resume(self.pid)
                         time.sleep(1) # without it Java.perform silently fails
+                
+                return job
 
             else:
                 print("[-] no frida session. Aborting...")
+            
 
         except frida.TransportError as fe:
             raise FridaBasedException(f"Problems while attaching to frida-server: {fe}")

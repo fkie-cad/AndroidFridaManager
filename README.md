@@ -1,12 +1,14 @@
+[![PyPI version](https://badge.fury.io/py/AndroidFridaManager.svg)](https://badge.fury.io/py/AndroidFridaManager)
+
 # AndroidFridaManager
 
 AndroidFridaManager is a Python API designed to simplify the installation and management of Frida on Android devices. It provides an easy-to-use interface for installing and running the latest Frida server, as well as the flexibility to install specific versions as needed.
 
-Key Features
+Key features:
 
-    Frida Server Management: Seamlessly install and run the latest Frida server on your Android device, or choose to install a specific version as required.
-    Job Management: Execute Frida scripts as independent jobs, managed by the `JobManager()`. This feature allows for concurrent execution of multiple Frida scripts, with each job running in its own thread.
-    `afrim` Tool Integration: Utilize the `afrim` tool to check for existing Frida server installations on your device and ensure you are always running the latest version.
+- Frida Server Management:  Seamlessly install and run the latest Frida server on your Android device, or choose to install a specific version as required.
+- Job Management: Execute Frida scripts as independent jobs, managed by the `JobManager()`. This feature allows for concurrent execution of multiple Frida scripts, with each job running in its own thread.
+- `afrim` Tool Integration: Utilize the `afrim` tool to check for existing Frida server installations on your device and ensure you are always running the latest version.
 
 
 The project was inspired by [Frida-Python-Binding](https://github.com/Mind0xP/Frida-Python-Binding/tree/master).
@@ -27,7 +29,6 @@ In order to easily install the latest frida-server version to your Android devic
 ```bash
 $ afrim 
 ```
-
 
 In order to check only if frida-server is running invoke it with the `-r`-parameter:
 
@@ -87,3 +88,7 @@ setup_frida_handler(host="", enable_spawn_gating=False) # returns the device obj
 
 # setup_frida_handler,setup_frida_session will raise the FridaBasedException(Exception). Ensure to handle it
 ```
+
+### JobManager
+
+The JobManager expect a running `frida-server`on the target device. 

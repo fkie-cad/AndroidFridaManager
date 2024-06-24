@@ -186,6 +186,8 @@ class FridaManager():
 
     def get_frida_server_for_android_url(self, version):
         arch = self._get_android_device_arch()
+        if self.verbose:
+            print(f"[*] Android architecture: {arch}")
         arch_str = "x86"
 
         if arch == "arm64":
@@ -198,6 +200,9 @@ class FridaManager():
             arch_str == "x86_64"
         else:
             arch_str = "x86"
+
+        if self.verbose:
+            print(f"[*] Android architecture string: {arch_str}")
 
         download_url = self._get_frida_server_donwload_url(arch_str,version)
         return download_url
