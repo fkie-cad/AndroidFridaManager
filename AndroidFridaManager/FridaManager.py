@@ -91,22 +91,50 @@ class FridaManager():
         else:
             command = "adb shell su 0 "+ cmd 
 
-        subprocess.Popen(command, shell=True)
+        try:
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Give it a moment to start and potentially fail
+            import time
+            time.sleep(1)
+            
+            # Check if process failed immediately
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                if "Address already in use" in stderr.decode():
+                    print("[*] frida-server is already running on the device")
+                    return
+                else:
+                    self.logger.error(f"Failed to start frida-server: {stderr.decode()}")
+                    raise RuntimeError(f"Failed to start frida-server: {stderr.decode()}")
+        except Exception as e:
+            self.logger.error(f"Error starting frida-server: {e}")
+            raise
 
 
     def is_frida_server_running(self):
         """
         Checks if on the connected device a frida server is running. 
-        The test is done by the Android system command pidof and is looking for the string frida-server.
+        The test is done by trying multiple methods to detect the frida-server process.
 
         :return: True if a frida-server is running otherwise False.
         :rtype: bool
         """
-        result = self.run_adb_command_as_root("/system/bin/pidof frida-server")
-        if len(result.stdout) > 1:
+        # Try pidof first (most reliable if available)
+        result = self.run_adb_command_as_root("pidof frida-server")
+        if result.stdout.strip():
             return True
-        else:
-            return False
+            
+        # Fallback to ps grep if pidof doesn't work
+        result = self.run_adb_command_as_root("ps | grep frida-server | grep -v grep")
+        if result.stdout.strip():
+            return True
+            
+        # Try alternative ps command format
+        result = self.run_adb_command_as_root("ps -A | grep frida-server | grep -v grep")
+        if result.stdout.strip():
+            return True
+            
+        return False
 
 
     def stop_frida_server(self):
