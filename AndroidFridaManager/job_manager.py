@@ -256,7 +256,7 @@ class JobManager(object):
         if job_id in self.jobs:
             return self.jobs[job_id]
         else:
-            raise ValueError(f"Job mit ID {job_id} nicht gefunden.")
+            raise ValueError(f"Job with ID {job_id} not found.")
 
 
     def detach_from_app(self):
@@ -299,13 +299,15 @@ class JobManager(object):
             # to handle forks
             def on_child_added(child):
                 print(f"Attached to child process with pid {child.pid}")
-                self.first_instrumenation_script(device.attach(child.pid))
+                if callable(self.first_instrumenation_script):
+                    self.first_instrumenation_script(device.attach(child.pid))
                 device.resume(child.pid)
 
             # if the target process is starting another process 
             def on_spawn_added(spawn):
                 print(f"Process spawned with pid {spawn.pid}. Name: {spawn.identifier}")
-                self.first_instrumenation_script(device.attach(spawn.pid))
+                if callable(self.first_instrumenation_script):
+                    self.first_instrumenation_script(device.attach(spawn.pid))
                 device.resume(spawn.pid)
 
             device.on("child_added", on_child_added)

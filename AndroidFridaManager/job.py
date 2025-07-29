@@ -45,7 +45,7 @@ class Job:
         self.script.on("message", self.wrap_custom_hooking_handler_with_job_id(self.custom_hooking_handler))
         self.script.load()
         self.state = "running"
-        print("[+] hooks succesfully loaded")
+        print("[+] hooks successfully loaded")
 
         #if self.is_running_as_thread:
         # Keep the thread alive to handle messages until stop_event is set
