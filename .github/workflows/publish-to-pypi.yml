@@ -2,8 +2,10 @@ name: Publish to PyPI
 
 on:
   push:
-    tags:
-      - 'v*'  # Trigger on version tags like v1.8.1, v2.0.0, etc.
+    branches:
+      - 'main'
+    paths:
+      - 'AndroidFridaManager/about.py'
 
 jobs:
   build-and-publish:
