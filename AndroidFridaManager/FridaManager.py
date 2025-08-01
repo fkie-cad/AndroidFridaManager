@@ -14,6 +14,7 @@ import warnings
 from shutil import copyfile
 import tempfile
 import argparse
+import shutil
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
@@ -40,6 +41,9 @@ class FridaManager():
         self.frida_install_dst = frida_install_dst
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
+
+        # Check if ADB is available
+        self._check_adb_availability()
 
         if self.is_remote:
             frida.get_device_manager().add_remote_device(self.device_socket)
@@ -71,9 +75,18 @@ class FridaManager():
             logging_handler.setFormatter(color_formatter)
             logger.addHandler(logging_handler)
 
+    def _check_adb_availability(self):
+        """
+        Check if ADB is available in the system PATH
+        """
+        if not shutil.which("adb"):
+            print("Error: ADB (Android Debug Bridge) is not found in your system PATH.")
+            print("Please install Android SDK platform-tools and add it to your PATH:")
+            print("  - Download from: https://developer.android.com/studio/releases/platform-tools")
+            print("  - Or install via package manager (e.g., 'brew install android-platform-tools' on macOS)")
+            print("  - Make sure 'adb' command is accessible from your terminal")
+            sys.exit(1)
 
-
-    
     def run_frida_server(self, frida_server_path="/data/local/tmp/"):
         # Check if frida-server is already running
         if self.is_frida_server_running():
