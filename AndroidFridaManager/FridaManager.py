@@ -106,6 +106,10 @@ class FridaManager():
                 else:
                     self.logger.error(f"Failed to start frida-server: {stderr.decode()}")
                     raise RuntimeError(f"Failed to start frida-server: {stderr.decode()}")
+            else:
+                # Process is still running (background), which is expected for frida-server
+                if self.verbose:
+                    self.logger.info("[*] frida-server started successfully in background")
         except Exception as e:
             self.logger.error(f"Error starting frida-server: {e}")
             raise
