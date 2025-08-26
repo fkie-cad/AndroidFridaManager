@@ -100,9 +100,9 @@ class FridaManager():
             cmd = frida_server_path + "frida-server &"
 
         if self.is_magisk_mode:
-            command = "adb shell su -c " + cmd
+            command = f"""adb shell "su -c 'sh -c \"{cmd}\"'" """
         else:
-            command = "adb shell su 0 "+ cmd 
+            command = f"""adb shell "su 0 sh -c \\"{cmd}\\"\" """ 
 
         try:
             process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
