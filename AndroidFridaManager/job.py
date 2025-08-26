@@ -5,6 +5,7 @@
 import threading
 import frida
 import uuid
+import logging
 
 # Define a custom exception for handling frida based exceptions
 class FridaBasedException(Exception):
@@ -21,6 +22,7 @@ class Job:
         self.process_session = process
         self.thread = None
         self.is_script_created = False
+        self.logger = logging.getLogger(__name__)
 
 
     def create_job_script(self):
@@ -45,7 +47,7 @@ class Job:
         self.script.on("message", self.wrap_custom_hooking_handler_with_job_id(self.custom_hooking_handler))
         self.script.load()
         self.state = "running"
-        print("[+] hooks successfully loaded")
+        self.logger.info("[+] hooks successfully loaded")
 
         #if self.is_running_as_thread:
         # Keep the thread alive to handle messages until stop_event is set
@@ -88,7 +90,7 @@ class Job:
         if self.script:
             self.script.unload()
         
-        print(f"Job {self.job_id} stopped")
+        self.logger.info(f"Job {self.job_id} stopped")
 
 
     def get_id(self):

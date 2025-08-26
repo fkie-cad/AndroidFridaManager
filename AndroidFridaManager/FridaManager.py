@@ -80,11 +80,11 @@ class FridaManager():
         Check if ADB is available in the system PATH
         """
         if not shutil.which("adb"):
-            print("Error: ADB (Android Debug Bridge) is not found in your system PATH.")
-            print("Please install Android SDK platform-tools and add it to your PATH:")
-            print("  - Download from: https://developer.android.com/studio/releases/platform-tools")
-            print("  - Or install via package manager (e.g., 'brew install android-platform-tools' on macOS)")
-            print("  - Make sure 'adb' command is accessible from your terminal")
+            self.logger.info("Error: ADB (Android Debug Bridge) is not found in your system PATH.")
+            self.logger.info("Please install Android SDK platform-tools and add it to your PATH:")
+            self.logger.info("  - Download from: https://developer.android.com/studio/releases/platform-tools")
+            self.logger.info("  - Or install via package manager (e.g., 'brew install android-platform-tools' on macOS)")
+            self.logger.info("  - Make sure 'adb' command is accessible from your terminal")
             sys.exit(1)
 
     def run_frida_server(self, frida_server_path="/data/local/tmp/"):
@@ -114,7 +114,7 @@ class FridaManager():
             if process.poll() is not None:
                 stdout, stderr = process.communicate()
                 if "Address already in use" in stderr.decode():
-                    print("[*] frida-server is already running on the device")
+                    self.logger.info("[*] frida-server is already running on the device")
                     return
                 else:
                     self.logger.error(f"Failed to start frida-server: {stderr.decode()}")
@@ -385,9 +385,9 @@ def main():
         if args.is_running:
             afm_obj = FridaManager()
             if afm_obj.is_frida_server_running():
-                print("[*] frida-server is running on Android device")
+                afm_obj.logger.info("[*] frida-server is running on Android device")
             else:
-                print("[*] frida-server is not running on Android device")
+                afm_obj.logger.info("[*] frida-server is not running on Android device")
 
             sys.exit()
 
@@ -400,9 +400,9 @@ def main():
     afm_obj.install_frida_server()
     result = afm_obj.is_frida_server_running()
     if result:
-        print("[*] succesfull installed and launched latest frida-server version on Android device")
+        afm_obj.logger.info("[*] succesfull installed and launched latest frida-server version on Android device")
     else:
-        print("[-] unable to run frida-server on Android device")
+        afm_obj.logger.error("[-] unable to run frida-server on Android device")
 
 
 if __name__ == "__main__":

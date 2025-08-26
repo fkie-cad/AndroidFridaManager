@@ -8,6 +8,7 @@ from typing import Optional, Dict, Union
 from .job import Job, FridaBasedException
 import time
 import re
+import logging
 
 class JobManager(object):
     """  A class representing the current Job manager. """
@@ -31,8 +32,24 @@ class JobManager(object):
         self.first_instrumenation_script = None
         self.last_created_job = None
         self.init_last_job = False
+        self.logger = logging.getLogger(__name__)
+        self._ensure_logging_setup()
         atexit.register(self.cleanup)
 
+    def _ensure_logging_setup(self):
+        """
+        Ensure basic logging setup if not already configured.
+        This provides a fallback for when JobManager is used independently.
+        """
+        root_logger = logging.getLogger()
+        if not root_logger.handlers:
+            # Set up basic logging if no handlers exist
+            root_logger.setLevel(logging.INFO)
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('[%(asctime)s] [%(levelname)-4s] - %(message)s', 
+                                        datefmt='%d-%m-%y %H:%M:%S')
+            handler.setFormatter(formatter)
+            root_logger.addHandler(handler)
 
     def cleanup(self) -> None:
         """
@@ -44,10 +61,10 @@ class JobManager(object):
             :return:
         """
         if len(self.jobs) > 0:
-            print("[*] Program closed. Stopping active jobs...")
+            self.logger.info("[*] Program closed. Stopping active jobs...")
             self.stop_jobs()
 
-        print("\n[*] Have a nice day!")
+        self.logger.info("\n[*] Have a nice day!")
     
 
     def job_list(self):
@@ -62,16 +79,16 @@ class JobManager(object):
     def running_jobs2(self):
         tuple_jobs = [job for job in self.jobs.items()]
         for job_id, job in tuple_jobs:
-            print(f"Job state of Job {job_id} in state {job.state}")
+            self.logger.debug(f"Job state of Job {job_id} in state {job.state}")
         return tuple_jobs
     '''
 
     def spawn(self, target_process):
         self.package_name = target_process
-        print("[*] spawning app: "+ target_process)
+        self.logger.info("[*] spawning app: "+ target_process)
         pid = self.device.spawn(target_process)
         self.process_session = self.device.attach(pid)
-        print(f"Spawned {target_process} with PID {pid}")
+        self.logger.info(f"Spawned {target_process} with PID {pid}")
         return pid
 
 
@@ -128,15 +145,15 @@ class JobManager(object):
         if foreground:
             target_process = self.device.get_frontmost_application()
             if target_process is None or len(target_process.identifier) < 2:
-                print("[-] unable to attach to the frontmost application. Aborting ...")
+                self.logger.error("[-] unable to attach to the frontmost application. Aborting ...")
 
             target_process = target_process.identifier
 
         if isinstance(target_process, int):
-            print(f"[*] attaching to PID: {target_process}")
+            self.logger.info(f"[*] attaching to PID: {target_process}")
             self.process_session = self.device.attach(target_process)
         else:
-            print(f"[*] attaching to app: {target_process}")
+            self.logger.info(f"[*] attaching to app: {target_process}")
             self.process_session = self.device.attach(int(target_process) if target_process.isnumeric() else target_process)
 
              
@@ -163,12 +180,12 @@ class JobManager(object):
                 job = Job(frida_script_name, custom_hooking_handler_name, self.process_session)
                 job.create_job_script()
                 self.init_last_job = True
-                print(f"[*] created job: {job.job_id}")
+                self.logger.info(f"[*] created job: {job.job_id}")
                 self.jobs[job.job_id] = job
                 self.last_created_job = job
 
             else:
-                print("[-] no frida session. Aborting...")
+                self.logger.error("[-] no frida session. Aborting...")
 
         except frida.TransportError as fe:
             raise FridaBasedException(f"Problems while attaching to frida-server: {fe}")
@@ -199,7 +216,7 @@ class JobManager(object):
         try:
             if self.process_session:
                 job = Job(frida_script_name, custom_hooking_handler_name, self.process_session)
-                print(f"[*] created job: {job.job_id}")
+                self.logger.info(f"[*] created job: {job.job_id}")
                 self.jobs[job.job_id] = job
                 self.last_created_job = job
                 job.run_job()
@@ -213,7 +230,7 @@ class JobManager(object):
                 return job
 
             else:
-                print("[-] no frida session. Aborting...")
+                self.logger.error("[-] no frida session. Aborting...")
             
 
         except frida.TransportError as fe:
@@ -233,10 +250,10 @@ class JobManager(object):
         jobs_to_stop = [job_id for job_id, job in self.jobs.items() if job.state == "running"]
         for job_id in jobs_to_stop:
             try:
-                print('[job manager] Job: {0} - Stopping'.format(job_id))
+                self.logger.info('[job manager] Job: {0} - Stopping'.format(job_id))
                 self.stop_job_with_id(job_id)
             except frida.InvalidOperationError:
-                print('[job manager] Job: {0} - An error occurred stopping job. Device may '
+                self.logger.error('[job manager] Job: {0} - An error occurred stopping job. Device may '
                              'no longer be available.'.format(job_id))
     
     
@@ -277,7 +294,7 @@ class JobManager(object):
     def stop_app_with_closing_frida(self, app_package):
         jobs_to_stop = [job_id for job_id, job in self.jobs.items() if job.state == "running"]
         for job_id in jobs_to_stop:
-            print(f"[*] trying to close job: {job_id}")
+            self.logger.info(f"[*] trying to close job: {job_id}")
             self.stop_job_with_id(job_id)
         
         self.detach_from_app()
@@ -298,14 +315,14 @@ class JobManager(object):
 
             # to handle forks
             def on_child_added(child):
-                print(f"Attached to child process with pid {child.pid}")
+                self.logger.info(f"Attached to child process with pid {child.pid}")
                 if callable(self.first_instrumenation_script):
                     self.first_instrumenation_script(device.attach(child.pid))
                 device.resume(child.pid)
 
             # if the target process is starting another process 
             def on_spawn_added(spawn):
-                print(f"Process spawned with pid {spawn.pid}. Name: {spawn.identifier}")
+                self.logger.info(f"Process spawned with pid {spawn.pid}. Name: {spawn.identifier}")
                 if callable(self.first_instrumenation_script):
                     self.first_instrumenation_script(device.attach(spawn.pid))
                 device.resume(spawn.pid)
