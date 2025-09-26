@@ -398,6 +398,7 @@ def main():
         afm_obj = FridaManager()
 
     afm_obj.install_frida_server()
+    afm_obj.run_frida_server()
     result = afm_obj.is_frida_server_running()
     if result:
         afm_obj.logger.info("[*] succesfull installed and launched latest frida-server version on Android device")
