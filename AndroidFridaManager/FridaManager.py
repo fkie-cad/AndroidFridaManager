@@ -92,7 +92,7 @@ class FridaManager():
         if self.is_frida_server_running():
             if self.verbose:
                 self.logger.info("[*] frida-server is already running, skipping start")
-            return
+            return True
             
         if frida_server_path is self.run_frida_server.__defaults__[0]:
             cmd = self.frida_install_dst + "frida-server &"
@@ -105,7 +105,7 @@ class FridaManager():
             command = f"""adb shell "su 0 sh -c \\"{cmd}\\"\" """ 
 
         try:
-            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             # Give it a moment to start and potentially fail
             import time
             time.sleep(1)
@@ -115,17 +115,24 @@ class FridaManager():
                 stdout, stderr = process.communicate()
                 if "Address already in use" in stderr.decode():
                     self.logger.info("[*] frida-server is already running on the device")
-                    return
+                    return True
                 else:
                     self.logger.error(f"Failed to start frida-server: {stderr.decode()}")
-                    raise RuntimeError(f"Failed to start frida-server: {stderr.decode()}")
+                    return False
             else:
                 # Process is still running (background), which is expected for frida-server
                 if self.verbose:
                     self.logger.info("[*] frida-server started successfully in background")
+
+            if self.is_frida_server_running():
+                return True
+            else:
+                self.logger.error("frida-server does not seem to be running after start command")
+                return False
+            
         except Exception as e:
             self.logger.error(f"Error starting frida-server: {e}")
-            raise
+            return False
 
 
     def is_frida_server_running(self):
@@ -197,6 +204,7 @@ class FridaManager():
                 self.logger.info(f"[*] pushing frida-server to {frida_dir}")
             self._adb_push_file(tmp_frida_server,frida_dir)
             self.make_frida_server_executable()
+            return True
 
 
     # by default the latest frida-server version will be downloaded
