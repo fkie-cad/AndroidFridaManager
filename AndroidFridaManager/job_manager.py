@@ -64,7 +64,7 @@ class JobManager(object):
             self.logger.info("[*] Program closed. Stopping active jobs...")
             self.stop_jobs()
 
-        self.logger.info("\n[*] Have a nice day!")
+        print("\n[*] Have a nice day!")
     
 
     def job_list(self):
