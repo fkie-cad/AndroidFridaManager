@@ -4,21 +4,24 @@
 import atexit
 import subprocess
 import frida
-from typing import Optional, Dict, Union
+from typing import Optional, Dict, Union, List
 from .job import Job, FridaBasedException
 import time
 import re
 import logging
 
 class JobManager(object):
-    """  A class representing the current Job manager. """
+    """  A class representing the current Job manager with multi-device support. """
 
 
-    def __init__(self,host="", enable_spawn_gating=False) -> None:
+    def __init__(self, host="", enable_spawn_gating=False, device_serial: Optional[str] = None) -> None:
         """
-            Init a new job manager. This method will also
-            register an atexit(), ensuring that cleanup operations
-            are performed on jobs when this class is GC'd.
+            Init a new job manager with optional device targeting.
+
+            :param host: Remote host for Frida connection (ip:port format)
+            :param enable_spawn_gating: Enable spawn gating for child process tracking
+            :param device_serial: Specific device serial to target (e.g., 'emulator-5554').
+                                  If None, uses default device selection.
         """
 
         self.jobs = {}
@@ -34,6 +37,11 @@ class JobManager(object):
         self.init_last_job = False
         self.logger = logging.getLogger(__name__)
         self._ensure_logging_setup()
+
+        # Multi-device support
+        self._device_serial = device_serial
+        self._multiple_devices = self._check_multiple_devices()
+
         atexit.register(self.cleanup)
 
     def _ensure_logging_setup(self):
@@ -46,10 +54,52 @@ class JobManager(object):
             # Set up basic logging if no handlers exist
             root_logger.setLevel(logging.INFO)
             handler = logging.StreamHandler()
-            formatter = logging.Formatter('[%(asctime)s] [%(levelname)-4s] - %(message)s', 
+            formatter = logging.Formatter('[%(asctime)s] [%(levelname)-4s] - %(message)s',
                                         datefmt='%d-%m-%y %H:%M:%S')
             handler.setFormatter(formatter)
             root_logger.addHandler(handler)
+
+    def _check_multiple_devices(self) -> bool:
+        """Check if multiple devices are connected."""
+        try:
+            result = subprocess.run(
+                ['adb', 'devices'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            # Count device lines (skip header)
+            device_count = sum(
+                1 for line in result.stdout.strip().split('\n')[1:]
+                if line.strip() and '\tdevice' in line
+            )
+            return device_count > 1
+        except Exception:
+            return False
+
+    def _build_adb_command(self, args: List[str]) -> List[str]:
+        """
+        Build ADB command with device targeting if needed.
+
+        :param args: ADB command arguments (without 'adb' prefix)
+        :return: Complete command list including device targeting
+        """
+        cmd = ['adb']
+        if self._device_serial and self._multiple_devices:
+            cmd.extend(['-s', self._device_serial])
+        cmd.extend(args)
+        return cmd
+
+    @property
+    def device_serial(self) -> Optional[str]:
+        """Get the current target device serial."""
+        return self._device_serial
+
+    @device_serial.setter
+    def device_serial(self, serial: str) -> None:
+        """Set the target device serial."""
+        self._device_serial = serial
+        self._multiple_devices = self._check_multiple_devices()
 
     def cleanup(self) -> None:
         """
@@ -65,7 +115,7 @@ class JobManager(object):
             self.stop_jobs()
 
         print("\n[*] Have a nice day!")
-    
+
 
     def job_list(self):
         return list(self.jobs.keys())
@@ -103,8 +153,8 @@ class JobManager(object):
         if main_activity:
             self.package_name = package_name
             # Prepare the base command for starting the app with main activity
-            cmd = ['adb', 'shell', 'am', 'start', '-n', f'{package_name}/{main_activity}']
-            
+            cmd = self._build_adb_command(['shell', 'am', 'start', '-n', f'{package_name}/{main_activity}'])
+
             # Add extras if provided
             if extras:
                 for key, value in extras.items():
@@ -114,11 +164,11 @@ class JobManager(object):
                         cmd.extend(['--es', key, value])
         else:
             # Command to start the app using monkey if no main activity is provided
-            cmd = ['adb', 'shell', 'monkey', '-p', package_name, '-c', 'android.intent.category.LAUNCHER', '1']
-        
+            cmd = self._build_adb_command(['shell', 'monkey', '-p', package_name, '-c', 'android.intent.category.LAUNCHER', '1'])
+
         # Run the command and capture the output
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    
+
         # Extract the PID from the output
         pid = None
         if 'ThisTime' in result.stdout:
@@ -128,7 +178,7 @@ class JobManager(object):
                 pid = int(pid_match.group(1))
         elif 'Events injected' in result.stdout:
             # `monkey` command does not provide PID directly, need to get it separately
-            pid_cmd = ['adb', 'shell', 'pidof', package_name]
+            pid_cmd = self._build_adb_command(['shell', 'pidof', package_name])
             pid_result = subprocess.run(pid_cmd, capture_output=True, text=True, check=True)
             if pid_result.stdout:
                 pid = int(pid_result.stdout.split()[0])
@@ -156,14 +206,13 @@ class JobManager(object):
             self.logger.info(f"[*] attaching to app: {target_process}")
             self.process_session = self.device.attach(int(target_process) if target_process.isnumeric() else target_process)
 
-             
 
 
     def setup_frida_session(self, target_process, custom_hooking_handler_name, should_spawn=True,foreground=False):
         self.first_instrumenation_script = custom_hooking_handler_name
         self.device = self.setup_frida_handler(self.host, self.enable_spawn_gating)
 
-        try:  
+        try:
             if should_spawn:
                 self.pid = self.spawn(target_process)
             else:
@@ -172,8 +221,8 @@ class JobManager(object):
             raise FridaBasedException(f"TimeOutError: {te}")
         except frida.ProcessNotFoundError as pe:
             raise FridaBasedException(f"ProcessNotFoundError: {pe}")
-        
-    
+
+
     def init_job(self,frida_script_name, custom_hooking_handler_name):
         try:
             if self.process_session:
@@ -211,7 +260,7 @@ class JobManager(object):
         except Exception as fe:
             raise FridaBasedException(f"Frida-Error: {fe}")
 
-        
+
     def start_job(self,frida_script_name, custom_hooking_handler_name):
         try:
             if self.process_session:
@@ -226,12 +275,12 @@ class JobManager(object):
                     if self.pid != -1:
                         self.device.resume(self.pid)
                         time.sleep(1) # without it Java.perform silently fails
-                
+
                 return job
 
             else:
                 self.logger.error("[-] no frida session. Aborting...")
-            
+
 
         except frida.TransportError as fe:
             raise FridaBasedException(f"Problems while attaching to frida-server: {fe}")
@@ -245,7 +294,7 @@ class JobManager(object):
             self.stop_app_with_last_job(job,self.package_name)
             pass
 
-    
+
     def stop_jobs(self):
         jobs_to_stop = [job_id for job_id, job in self.jobs.items() if job.state == "running"]
         for job_id in jobs_to_stop:
@@ -255,8 +304,8 @@ class JobManager(object):
             except frida.InvalidOperationError:
                 self.logger.error('[job manager] Job: {0} - An error occurred stopping job. Device may '
                              'no longer be available.'.format(job_id))
-    
-    
+
+
     def stop_job_with_id(self,job_id):
         if job_id in self.jobs:
             job = self.jobs[job_id]
@@ -282,13 +331,14 @@ class JobManager(object):
 
 
     def stop_app(self, app_package):
-        subprocess.run(["adb", "shell", "am", "force-stop", app_package])
+        cmd = self._build_adb_command(["shell", "am", "force-stop", app_package])
+        subprocess.run(cmd)
 
 
     def stop_app_with_last_job(self, last_job, app_package):
         last_job.close_job()
         self.stop_app(app_package)
-        
+
 
 
     def stop_app_with_closing_frida(self, app_package):
@@ -296,21 +346,44 @@ class JobManager(object):
         for job_id in jobs_to_stop:
             self.logger.info(f"[*] trying to close job: {job_id}")
             self.stop_job_with_id(job_id)
-        
+
         self.detach_from_app()
-        subprocess.run(["adb", "shell", "am", "force-stop", app_package])
+        cmd = self._build_adb_command(["shell", "am", "force-stop", app_package])
+        subprocess.run(cmd)
 
 
     def kill_app(self, pid):
-        subprocess.run(["adb", "shell", "kill", str(pid)])
+        cmd = self._build_adb_command(["shell", "kill", str(pid)])
+        subprocess.run(cmd)
 
-    
-    def setup_frida_handler(self,host="", enable_spawn_gating=False):
+
+    def setup_frida_handler(self, host="", enable_spawn_gating=False):
+        """
+        Setup the Frida device handler with multi-device support.
+
+        :param host: Remote host for Frida connection
+        :param enable_spawn_gating: Enable spawn gating
+        :return: Frida Device object
+        """
         try:
             if len(host) > 4:
-                # we can also use the IP address ot the target machine instead of using USB - e.g. when we have multpile AVDs
+                # Remote device connection
                 device = frida.get_device_manager().add_remote_device(host)
+            elif self._device_serial:
+                # Multi-device: Get specific device by serial
+                try:
+                    device = frida.get_device(self._device_serial)
+                except frida.InvalidArgumentError:
+                    # Fallback: enumerate and find by ID
+                    device = None
+                    for d in frida.enumerate_devices():
+                        if d.id == self._device_serial:
+                            device = d
+                            break
+                    if device is None:
+                        raise FridaBasedException(f"Frida device '{self._device_serial}' not found")
             else:
+                # Single device: Use USB device
                 device = frida.get_usb_device()
 
             # to handle forks
@@ -320,7 +393,7 @@ class JobManager(object):
                     self.first_instrumenation_script(device.attach(child.pid))
                 device.resume(child.pid)
 
-            # if the target process is starting another process 
+            # if the target process is starting another process
             def on_spawn_added(spawn):
                 self.logger.info(f"Process spawned with pid {spawn.pid}. Name: {spawn.identifier}")
                 if callable(self.first_instrumenation_script):
@@ -331,7 +404,7 @@ class JobManager(object):
             if enable_spawn_gating:
                 device.enable_spawn_gating()
                 device.on("spawn_added", on_spawn_added)
-            
+
             return device
 
         except frida.InvalidArgumentError:
