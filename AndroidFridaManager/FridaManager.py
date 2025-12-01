@@ -41,6 +41,7 @@ class FridaManager():
         self.device_socket = socket
         self.verbose = verbose
         self.is_magisk_mode = False
+        self.is_adb_root_mode = False  # LineageOS adb root mode (adbd runs as root)
         self.frida_install_dst = frida_install_dst
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
@@ -73,7 +74,10 @@ class FridaManager():
         """Set the target device serial."""
         self._validate_device(serial)
         self._device_serial = serial
-        self._is_rooted = None  # Reset cached root status
+        # Reset cached root status and mode flags for new device
+        self._is_rooted = None
+        self.is_magisk_mode = False
+        self.is_adb_root_mode = False
 
     def _setup_logging(self):
         """
@@ -308,15 +312,26 @@ class FridaManager():
                 self.logger.info("[*] frida-server is already running, skipping start")
             return True
 
-        if frida_server_path is self.run_frida_server.__defaults__[0]:
-            cmd = self.frida_install_dst + "frida-server &"
-        else:
-            cmd = frida_server_path + "frida-server &"
+        # Ensure root access is available
+        if not self.is_device_rooted():
+            self.logger.error("Cannot start frida-server: device is not rooted")
+            return False
 
-        if self.is_magisk_mode:
-            shell_cmd = f"""su -c 'sh -c "{cmd}"'"""
+        if frida_server_path is self.run_frida_server.__defaults__[0]:
+            frida_bin = self.frida_install_dst + "frida-server"
         else:
-            shell_cmd = f"""su 0 sh -c "{cmd}" """
+            frida_bin = frida_server_path + "frida-server"
+
+        # Build the command based on root mode
+        if self.is_adb_root_mode:
+            # ADB root mode (LineageOS): run directly, adbd is already root
+            shell_cmd = f"{frida_bin} &"
+        elif self.is_magisk_mode:
+            # Magisk mode
+            shell_cmd = f"""su -c 'sh -c "{frida_bin} &"'"""
+        else:
+            # Traditional su mode
+            shell_cmd = f"""su 0 sh -c "{frida_bin} &" """
 
         try:
             adb_cmd = self._build_adb_command(['shell', shell_cmd])
@@ -574,17 +589,27 @@ class FridaManager():
         """
         Run an ADB command as root on the target device.
 
+        Supports three root modes:
+        1. ADB root mode (LineageOS): Commands run directly (adbd is root)
+        2. Magisk mode: Uses 'su -c command'
+        3. Traditional su: Uses 'su 0 command'
+
         :param command: Command to run as root
         :return: subprocess.CompletedProcess with stdout/stderr
         :raises RuntimeError: If device is not rooted
         """
         if not self.is_device_rooted():
-            self.logger.error("Device is not rooted. Please root it before using FridaAndroidManager and ensure that you are able to run commands with the su-binary.")
+            self.logger.error("Device is not rooted. Please root it before using FridaAndroidManager and ensure that you are able to run commands with the su-binary or enable ADB root mode.")
             raise RuntimeError("Device not rooted or su binary not accessible")
 
-        if self.is_magisk_mode:
+        if self.is_adb_root_mode:
+            # ADB root mode (LineageOS): adbd runs as root, no su needed
+            adb_cmd = self._build_adb_command(['shell', command])
+        elif self.is_magisk_mode:
+            # Magisk mode: use su -c
             adb_cmd = self._build_adb_command(['shell', f'su -c {command}'])
         else:
+            # Traditional su mode
             adb_cmd = self._build_adb_command(['shell', f'su 0 {command}'])
 
         return subprocess.run(adb_cmd, capture_output=True, text=True)
@@ -653,11 +678,32 @@ class FridaManager():
 
     def adb_check_root(self) -> bool:
         """
-        Check if the device has root access via su binary.
+        Check if the device has root access.
+
+        Supports three root modes:
+        1. ADB root mode (LineageOS): adbd runs as root, no su needed
+        2. Magisk mode: su -c command
+        3. Traditional su: su 0 command
 
         :return: True if root is available, False otherwise
         """
         try:
+            # First, check for ADB root mode (LineageOS with "adb root" enabled)
+            # In this mode, adbd runs as root and all shell commands are root
+            result = subprocess.run(
+                self._build_adb_command(['shell', 'id', '-u']),
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.stdout.strip() == "0":
+                # Shell is already running as root (adb root mode)
+                self.is_adb_root_mode = True
+                self.is_magisk_mode = False
+                if self.verbose:
+                    self.logger.info("[*] Detected ADB root mode (adbd running as root)")
+                return True
+
             # Try Magisk-style su
             result = subprocess.run(
                 self._build_adb_command(['shell', 'su -v']),
@@ -667,6 +713,9 @@ class FridaManager():
             )
             if result.stdout.strip():
                 self.is_magisk_mode = True
+                self.is_adb_root_mode = False
+                if self.verbose:
+                    self.logger.info("[*] Detected Magisk root mode")
                 return True
 
             # Try traditional su
@@ -677,6 +726,10 @@ class FridaManager():
                 timeout=5
             )
             if result.stdout.strip() == "0":
+                self.is_magisk_mode = False
+                self.is_adb_root_mode = False
+                if self.verbose:
+                    self.logger.info("[*] Detected traditional su root mode")
                 return True
 
             return False
