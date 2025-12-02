@@ -274,7 +274,9 @@ class FridaManager():
         :return: Complete command list including device targeting
         """
         cmd = ['adb']
-        if self._device_serial and self._multiple_devices:
+        # Always include device serial if set - important when user explicitly
+        # specifies a device or when multiple devices are connected
+        if self._device_serial:
             cmd.extend(['-s', self._device_serial])
         cmd.extend(args)
         return cmd
@@ -441,12 +443,23 @@ class FridaManager():
         :type dst_dir: string
         :param version: The version. By default the latest version will be used.
         :type version: string
+        :raises RuntimeError: If device is not rooted
 
         """
+        # Check root access BEFORE downloading - fail fast to save time
+        if not self.is_device_rooted():
+            self.logger.error(
+                "Device is not rooted. Frida server installation requires root access. "
+                "Please root the device or use an emulator."
+            )
+            raise RuntimeError("Cannot install frida-server: device not rooted")
+
         if dst_dir is self.install_frida_server.__defaults__[0]:
             frida_dir = self.frida_install_dst
         else:
             frida_dir = dst_dir
+
+        self.logger.info("Installing frida-server now...")
 
         with tempfile.TemporaryDirectory() as dir:
             if self.verbose:
