@@ -1,18 +1,62 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Frida Job management for AndroidFridaManager.
 
+This module provides the Job class for managing individual Frida instrumentation
+jobs, including script loading, message handling, and lifecycle management.
+"""
 
 import threading
 import frida
 import uuid
 import logging
+import datetime
+from typing import Optional, List, Callable, Any
+
 
 # Define a custom exception for handling frida based exceptions
 class FridaBasedException(Exception):
     pass
 
+
 class Job:
-    def __init__(self, frida_script_name, custom_hooking_handler, process):
+    """Represents a single Frida instrumentation job.
+
+    A job encapsulates a Frida script, its message handler, and lifecycle
+    management. Jobs run in separate threads and can be started/stopped
+    independently.
+
+    Attributes:
+        job_id: Unique identifier for this job.
+        job_type: Category of job (e.g., "fritap", "dexray", "trigdroid", "custom").
+        display_name: Human-readable name for UI display.
+        hooks_registry: List of methods/functions this job hooks (for conflict detection).
+        priority: Job priority (lower = higher priority, default 50).
+        state: Current state ("initialized", "running", "stopping").
+        started_at: Timestamp when job was started (None if not started).
+    """
+
+    def __init__(
+        self,
+        frida_script_name: str,
+        custom_hooking_handler: Callable,
+        process: Any,
+        job_type: str = "custom",
+        display_name: Optional[str] = None,
+        hooks_registry: Optional[List[str]] = None,
+        priority: int = 50,
+    ):
+        """Initialize a new Job.
+
+        Args:
+            frida_script_name: Path to the Frida script file.
+            custom_hooking_handler: Callback function for handling Frida messages.
+            process: Frida session/process to attach the script to.
+            job_type: Category of job for coordination (default: "custom").
+            display_name: Human-readable name (default: script filename).
+            hooks_registry: List of hooked methods for conflict detection.
+            priority: Job priority, lower = higher (default: 50).
+        """
         self.frida_script_name = frida_script_name
         self.job_id = str(uuid.uuid4())
         self.state = "initialized"
@@ -24,6 +68,13 @@ class Job:
         self.is_script_created = False
         self.logger = logging.getLogger(__name__)
 
+        # New metadata fields for job coordination
+        self.job_type = job_type
+        self.display_name = display_name or frida_script_name
+        self.hooks_registry = hooks_registry or []
+        self.priority = priority
+        self.started_at: Optional[datetime.datetime] = None
+
 
     def create_job_script(self):
         self.instrument(self.process_session)
@@ -31,7 +82,8 @@ class Job:
     
     
     def run_job(self):
-        #self.is_running_as_thread = True
+        """Start the job execution in a separate thread."""
+        self.started_at = datetime.datetime.now()
         self.run_job_as_thread()
 
 
@@ -99,3 +151,21 @@ class Job:
 
     def get_script_of_job(self):
         return self.script
+
+    def get_info(self) -> dict:
+        """Get job information as a dictionary for UI display.
+
+        Returns:
+            Dictionary containing job metadata and state information.
+        """
+        return {
+            "job_id": self.job_id,
+            "job_type": self.job_type,
+            "display_name": self.display_name,
+            "state": self.state,
+            "priority": self.priority,
+            "hooks_count": len(self.hooks_registry),
+            "hooks_registry": self.hooks_registry.copy(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "script_name": self.frida_script_name,
+        }

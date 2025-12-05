@@ -1,30 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Frida JobManager for coordinating multiple instrumentation jobs.
+
+This module provides the JobManager class for managing Frida sessions and
+coordinating multiple instrumentation jobs on Android devices.
+"""
 
 import atexit
 import subprocess
 import frida
-from typing import Optional, Dict, Union, List
+from typing import Optional, Dict, Union, List, Callable
 from .job import Job, FridaBasedException
 import time
 import re
 import logging
 
-class JobManager(object):
-    """  A class representing the current Job manager with multi-device support. """
 
+class JobManager(object):
+    """Job manager with multi-device support and hook coordination.
+
+    Manages Frida sessions and coordinates multiple instrumentation jobs,
+    providing hook conflict detection and session status information.
+
+    Attributes:
+        jobs: Dictionary of active jobs by job_id.
+        process_session: Current Frida session.
+        device: Current Frida device.
+        package_name: Name of the attached/spawned package.
+        pid: Process ID (-1 if attach mode).
+    """
 
     def __init__(self, host="", enable_spawn_gating=False, device_serial: Optional[str] = None) -> None:
-        """
-            Init a new job manager with optional device targeting.
+        """Init a new job manager with optional device targeting.
 
-            :param host: Remote host for Frida connection (ip:port format)
-            :param enable_spawn_gating: Enable spawn gating for child process tracking
-            :param device_serial: Specific device serial to target (e.g., 'emulator-5554').
-                                  If None, uses default device selection.
+        Args:
+            host: Remote host for Frida connection (ip:port format).
+            enable_spawn_gating: Enable spawn gating for child process tracking.
+            device_serial: Specific device serial to target (e.g., 'emulator-5554').
+                          If None, uses default device selection.
         """
-
-        self.jobs = {}
+        self.jobs: Dict[str, Job] = {}
         self.is_first_job = True
         self.process_session = None
         self.host = host
@@ -41,6 +56,11 @@ class JobManager(object):
         # Multi-device support
         self._device_serial = device_serial
         self._multiple_devices = self._check_multiple_devices()
+
+        # Hook coordination (NEW)
+        self._hook_registry: Dict[str, str] = {}  # hook_target -> job_id
+        self._mode: Optional[str] = None  # "spawn" or "attach"
+        self._paused: bool = False  # Track if spawned process is paused
 
         atexit.register(self.cleanup)
 
@@ -134,13 +154,80 @@ class JobManager(object):
     '''
 
     def spawn(self, target_process):
+        """Spawn a new process and attach to it.
+
+        Args:
+            target_process: Package name to spawn.
+
+        Returns:
+            Process ID of the spawned process.
+        """
+        self._mode = "spawn"
         self.package_name = target_process
         self.logger.info("[*] spawning app: "+ target_process)
         pid = self.device.spawn(target_process)
         self.process_session = self.device.attach(pid)
+        self.pid = pid
+        self._paused = True  # Spawned processes start paused
         self.logger.info(f"Spawned {target_process} with PID {pid}")
         return pid
 
+    def spawn_paused(self, target_process: str) -> int:
+        """Spawn a process but keep it paused for multi-tool loading.
+
+        Unlike the regular spawn flow where resume happens on first job,
+        this method keeps the process paused until explicitly resumed
+        via resume_app(). This allows loading multiple Jobs before
+        the app starts executing.
+
+        Args:
+            target_process: Package name to spawn.
+
+        Returns:
+            Process ID of the spawned (paused) process.
+        """
+        self._mode = "spawn"
+        self.package_name = target_process
+        self.logger.info(f"[*] spawning app (paused): {target_process}")
+        pid = self.device.spawn(target_process)
+        self.process_session = self.device.attach(pid)
+        self.pid = pid
+        self._paused = True
+        # Mark that auto-resume should NOT happen
+        self.is_first_job = False  # Prevent auto-resume in start_job()
+        self.logger.info(f"Spawned {target_process} with PID {pid} (PAUSED - awaiting manual resume)")
+        return pid
+
+    def resume_app(self) -> bool:
+        """Resume a paused spawned process.
+
+        Call this after loading all Jobs to start the app with
+        all hooks already installed.
+
+        Returns:
+            True if resumed successfully, False if not paused or failed.
+        """
+        if not self._paused or self.pid == -1:
+            self.logger.warning("No paused process to resume")
+            return False
+
+        try:
+            self.device.resume(self.pid)
+            self._paused = False
+            time.sleep(1)  # Required for Java.perform stability
+            self.logger.info(f"Resumed process {self.pid}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to resume process: {e}")
+            return False
+
+    def is_paused(self) -> bool:
+        """Check if the spawned process is currently paused.
+
+        Returns:
+            True if process is spawned and waiting for resume.
+        """
+        return self._paused
 
     def start_android_app(self, package_name: str, main_activity: Optional[str] = None, extras: Optional[Dict[str, Union[str, bool]]] = None):
         """
@@ -190,6 +277,13 @@ class JobManager(object):
 
 
     def attach_app(self, target_process, foreground=False):
+        """Attach to a running process.
+
+        Args:
+            target_process: Package name or PID to attach to.
+            foreground: If True, attach to the frontmost application.
+        """
+        self._mode = "attach"
         self.package_name = target_process
 
         if foreground:
@@ -261,11 +355,44 @@ class JobManager(object):
             raise FridaBasedException(f"Frida-Error: {fe}")
 
 
-    def start_job(self,frida_script_name, custom_hooking_handler_name):
+    def start_job(
+        self,
+        frida_script_name: str,
+        custom_hooking_handler_name: Callable,
+        job_type: str = "custom",
+        display_name: Optional[str] = None,
+        hooks_registry: Optional[List[str]] = None,
+        priority: int = 50,
+    ) -> Optional[Job]:
+        """Start a new instrumentation job.
+
+        Args:
+            frida_script_name: Path to the Frida script file.
+            custom_hooking_handler_name: Callback for handling Frida messages.
+            job_type: Category of job (e.g., "fritap", "dexray", "trigdroid").
+            display_name: Human-readable name for UI display.
+            hooks_registry: List of hooked methods for conflict detection.
+            priority: Job priority (lower = higher priority).
+
+        Returns:
+            The created Job instance, or None if no session exists.
+
+        Raises:
+            FridaBasedException: If Frida encounters an error.
+        """
+        job = None  # Initialize before try block for safe exception handling
         try:
             if self.process_session:
-                job = Job(frida_script_name, custom_hooking_handler_name, self.process_session)
-                self.logger.info(f"[*] created job: {job.job_id}")
+                job = Job(
+                    frida_script_name,
+                    custom_hooking_handler_name,
+                    self.process_session,
+                    job_type=job_type,
+                    display_name=display_name,
+                    hooks_registry=hooks_registry,
+                    priority=priority,
+                )
+                self.logger.info(f"[*] created job: {job.job_id} ({job.display_name})")
                 self.jobs[job.job_id] = job
                 self.last_created_job = job
                 job.run_job()
@@ -274,13 +401,14 @@ class JobManager(object):
                     self.first_instrumenation_script = custom_hooking_handler_name
                     if self.pid != -1:
                         self.device.resume(self.pid)
-                        time.sleep(1) # without it Java.perform silently fails
+                        self._paused = False  # Mark as resumed
+                        time.sleep(1)  # without it Java.perform silently fails
 
                 return job
 
             else:
                 self.logger.error("[-] no frida session. Aborting...")
-
+                return None
 
         except frida.TransportError as fe:
             raise FridaBasedException(f"Problems while attaching to frida-server: {fe}")
@@ -291,8 +419,9 @@ class JobManager(object):
         except frida.ProcessNotFoundError as pe:
             raise FridaBasedException(f"ProcessNotFoundError: {pe}")
         except KeyboardInterrupt:
-            self.stop_app_with_last_job(job,self.package_name)
-            pass
+            if job:
+                self.stop_app_with_last_job(job, self.package_name)
+            return None
 
 
     def stop_jobs(self):
@@ -306,9 +435,16 @@ class JobManager(object):
                              'no longer be available.'.format(job_id))
 
 
-    def stop_job_with_id(self,job_id):
+    def stop_job_with_id(self, job_id: str) -> None:
+        """Stop a specific job by ID.
+
+        Args:
+            job_id: UUID of the job to stop.
+        """
         if job_id in self.jobs:
             job = self.jobs[job_id]
+            # Unregister hooks before closing
+            self.unregister_hooks(job_id)
             job.close_job()
             del self.jobs[job_id]
 
@@ -411,3 +547,154 @@ class JobManager(object):
             raise FridaBasedException("Unable to find device")
         except frida.ServerNotRunningError:
             raise FridaBasedException("Frida server not running. Start frida-server and try it again.")
+
+    # ==================== Hook Coordination Methods ====================
+
+    def register_hooks(self, job_id: str, hooks: List[str]) -> List[str]:
+        """Register hooks for a job and detect conflicts.
+
+        Args:
+            job_id: UUID of the job registering hooks.
+            hooks: List of hook targets (method names, function signatures).
+
+        Returns:
+            List of conflicting hooks that are already registered by other jobs.
+        """
+        conflicts = []
+        for hook in hooks:
+            if hook in self._hook_registry:
+                existing_job_id = self._hook_registry[hook]
+                if existing_job_id != job_id:
+                    conflicts.append(hook)
+                    self.logger.warning(
+                        f"Hook conflict: '{hook}' already registered by job {existing_job_id[:8]}"
+                    )
+            else:
+                self._hook_registry[hook] = job_id
+
+        if conflicts:
+            self.logger.warning(
+                f"Job {job_id[:8]} has {len(conflicts)} hook conflict(s)"
+            )
+
+        return conflicts
+
+    def unregister_hooks(self, job_id: str) -> None:
+        """Remove all hooks registered by a job.
+
+        Args:
+            job_id: UUID of the job whose hooks should be removed.
+        """
+        hooks_to_remove = [
+            hook for hook, jid in self._hook_registry.items() if jid == job_id
+        ]
+        for hook in hooks_to_remove:
+            del self._hook_registry[hook]
+
+        if hooks_to_remove:
+            self.logger.debug(
+                f"Unregistered {len(hooks_to_remove)} hooks for job {job_id[:8]}"
+            )
+
+    def check_hook_conflicts(self, hooks: List[str]) -> Dict[str, str]:
+        """Check for potential conflicts before registering hooks.
+
+        Args:
+            hooks: List of hook targets to check.
+
+        Returns:
+            Dictionary mapping conflicting hooks to their owning job IDs.
+        """
+        return {
+            hook: self._hook_registry[hook]
+            for hook in hooks
+            if hook in self._hook_registry
+        }
+
+    def get_hook_registry(self) -> Dict[str, str]:
+        """Get a copy of the current hook registry.
+
+        Returns:
+            Dictionary mapping hook targets to job IDs.
+        """
+        return self._hook_registry.copy()
+
+    # ==================== Session Info Methods ====================
+
+    def has_active_session(self) -> bool:
+        """Check if there's an active Frida session.
+
+        Returns:
+            True if a session is active, False otherwise.
+        """
+        return self.process_session is not None
+
+    def get_session_info(self) -> Dict[str, any]:
+        """Get current session information for UI display.
+
+        Returns:
+            Dictionary containing session state information.
+        """
+        return {
+            "package": self.package_name,
+            "pid": self.pid,
+            "mode": self._mode or ("spawn" if self.pid != -1 else "attach"),
+            "device_serial": self._device_serial,
+            "has_session": self.process_session is not None,
+            "job_count": len(self.jobs),
+            "running_job_count": len(self.running_jobs()),
+        }
+
+    def get_running_jobs_info(self) -> List[Dict[str, any]]:
+        """Get information about running jobs for UI display.
+
+        Returns:
+            List of dictionaries containing job information.
+        """
+        return [
+            job.get_info()
+            for job in self.jobs.values()
+            if job.state == "running"
+        ]
+
+    def get_all_jobs_info(self) -> List[Dict[str, any]]:
+        """Get information about all jobs (running and stopped).
+
+        Returns:
+            List of dictionaries containing job information.
+        """
+        return [job.get_info() for job in self.jobs.values()]
+
+    @property
+    def mode(self) -> Optional[str]:
+        """Get the current session mode ('spawn' or 'attach')."""
+        return self._mode
+
+    def reset_session(self) -> None:
+        """Reset the session state for a new connection.
+
+        Stops all jobs, clears hook registry, and resets session state.
+        """
+        # Stop all running jobs
+        self.stop_jobs()
+
+        # Clear hook registry
+        self._hook_registry.clear()
+
+        # Detach from app
+        if self.process_session:
+            try:
+                self.process_session.detach()
+            except Exception:
+                pass
+
+        # Reset state
+        self.process_session = None
+        self.pid = -1
+        self.package_name = ""
+        self._mode = None
+        self.is_first_job = True
+        self.last_created_job = None
+        self.init_last_job = False
+
+        self.logger.info("[*] Session reset complete")
