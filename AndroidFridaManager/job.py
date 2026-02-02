@@ -134,15 +134,38 @@ class Job:
                 raise FridaBasedException("Connection is closed. Probably the target app crashed")
 
 
-    def close_job(self):
+    def close_job(self, timeout: float = 5.0) -> bool:
+        """Stop the job and cleanup resources.
+
+        Args:
+            timeout: Maximum seconds to wait for thread to stop.
+                     Default 5.0 seconds. Use 0 for no wait.
+
+        Returns:
+            True if job stopped cleanly, False if timed out.
+        """
         self.state = "stopping"
         self.stop_event.set()
-        if self.thread:
-            self.thread.join()
+
+        timed_out = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=timeout if timeout > 0 else None)
+            if self.thread.is_alive():
+                self.logger.warning(
+                    f"Job {self.job_id} thread did not stop within {timeout}s"
+                )
+                timed_out = True
+
+        # Try to unload script even if thread timed out
         if self.script:
-            self.script.unload()
-        
-        self.logger.info(f"Job {self.job_id} stopped")
+            try:
+                self.script.unload()
+            except Exception as e:
+                self.logger.warning(f"Error unloading script: {e}")
+
+        status = "timed out" if timed_out else "stopped"
+        self.logger.info(f"Job {self.job_id} {status}")
+        return not timed_out
 
 
     def get_id(self):

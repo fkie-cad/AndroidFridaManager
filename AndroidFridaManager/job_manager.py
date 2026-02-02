@@ -424,29 +424,48 @@ class JobManager(object):
             return None
 
 
-    def stop_jobs(self):
+    def stop_jobs(self, timeout_per_job: float = 3.0) -> dict:
+        """Stop all running jobs.
+
+        Args:
+            timeout_per_job: Maximum seconds to wait per job.
+
+        Returns:
+            Dictionary mapping job_id to success status.
+        """
+        results = {}
         jobs_to_stop = [job_id for job_id, job in self.jobs.items() if job.state == "running"]
+
         for job_id in jobs_to_stop:
             try:
-                self.logger.info('[job manager] Job: {0} - Stopping'.format(job_id))
-                self.stop_job_with_id(job_id)
+                self.logger.info(f'[job manager] Job: {job_id} - Stopping')
+                results[job_id] = self.stop_job_with_id(job_id, timeout=timeout_per_job)
             except frida.InvalidOperationError:
-                self.logger.error('[job manager] Job: {0} - An error occurred stopping job. Device may '
-                             'no longer be available.'.format(job_id))
+                self.logger.error(f'[job manager] Job: {job_id} - Error stopping')
+                results[job_id] = False
+
+        return results
 
 
-    def stop_job_with_id(self, job_id: str) -> None:
+    def stop_job_with_id(self, job_id: str, timeout: float = 5.0) -> bool:
         """Stop a specific job by ID.
 
         Args:
             job_id: UUID of the job to stop.
+            timeout: Maximum seconds to wait for job to stop.
+
+        Returns:
+            True if job stopped cleanly, False if timed out or not found.
         """
-        if job_id in self.jobs:
-            job = self.jobs[job_id]
-            # Unregister hooks before closing
-            self.unregister_hooks(job_id)
-            job.close_job()
-            del self.jobs[job_id]
+        if job_id not in self.jobs:
+            return False
+
+        job = self.jobs[job_id]
+        # Unregister hooks before closing
+        self.unregister_hooks(job_id)
+        success = job.close_job(timeout=timeout)
+        del self.jobs[job_id]
+        return success
 
 
     def get_last_created_job(self):
@@ -461,9 +480,37 @@ class JobManager(object):
             raise ValueError(f"Job with ID {job_id} not found.")
 
 
-    def detach_from_app(self):
-        if self.process_session:
+    def detach_from_app(self, timeout: float = 3.0) -> bool:
+        """Detach from the current app session.
+
+        Args:
+            timeout: Maximum seconds to wait for detach.
+
+        Returns:
+            True if detached successfully, False if timed out or failed.
+        """
+        if not self.process_session:
+            return True
+
+        import concurrent.futures
+
+        def _detach():
             self.process_session.detach()
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_detach)
+                future.result(timeout=timeout)
+            self.process_session = None
+            return True
+        except concurrent.futures.TimeoutError:
+            self.logger.warning(f"Detach timed out after {timeout}s")
+            self.process_session = None  # Clear anyway to avoid reuse
+            return False
+        except Exception as e:
+            self.logger.warning(f"Detach failed: {e}")
+            self.process_session = None
+            return False
 
 
     def stop_app(self, app_package):
@@ -670,23 +717,21 @@ class JobManager(object):
         """Get the current session mode ('spawn' or 'attach')."""
         return self._mode
 
-    def reset_session(self) -> None:
+    def reset_session(self, timeout_per_job: float = 2.0, detach_timeout: float = 2.0) -> None:
         """Reset the session state for a new connection.
 
-        Stops all jobs, clears hook registry, and resets session state.
+        Args:
+            timeout_per_job: Max seconds to wait per job when stopping.
+            detach_timeout: Max seconds to wait for session detach.
         """
-        # Stop all running jobs
-        self.stop_jobs()
+        # Stop all running jobs with timeout
+        self.stop_jobs(timeout_per_job=timeout_per_job)
 
         # Clear hook registry
         self._hook_registry.clear()
 
-        # Detach from app
-        if self.process_session:
-            try:
-                self.process_session.detach()
-            except Exception:
-                pass
+        # Detach from app with timeout
+        self.detach_from_app(timeout=detach_timeout)
 
         # Reset state
         self.process_session = None

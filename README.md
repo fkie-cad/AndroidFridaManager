@@ -1,4 +1,4 @@
-![version](https://img.shields.io/badge/version-1.9.4-blue) [![PyPI version](https://badge.fury.io/py/AndroidFridaManager.svg)](https://badge.fury.io/py/AndroidFridaManager) [![Publish status](https://github.com/fkie-cad/friTap/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/AndroidFridaManager/actions/workflows/publish-to-pypi.yml)
+![version](https://img.shields.io/badge/version-1.9.5-blue) [![PyPI version](https://badge.fury.io/py/AndroidFridaManager.svg)](https://badge.fury.io/py/AndroidFridaManager) [![Publish status](https://github.com/fkie-cad/friTap/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/AndroidFridaManager/actions/workflows/publish-to-pypi.yml)
 
 # AndroidFridaManager
 
