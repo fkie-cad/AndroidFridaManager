@@ -32,7 +32,7 @@ class Job:
         display_name: Human-readable name for UI display.
         hooks_registry: List of methods/functions this job hooks (for conflict detection).
         priority: Job priority (lower = higher priority, default 50).
-        state: Current state ("initialized", "running", "stopping").
+        state: Current state ("initialized", "running", "stopping", "error", "stopped").
         started_at: Timestamp when job was started (None if not started).
     """
 
@@ -75,6 +75,50 @@ class Job:
         self.priority = priority
         self.started_at: Optional[datetime.datetime] = None
 
+        # State propagation for callers to wait on job readiness
+        self._ready_event = threading.Event()
+        self._error_message: Optional[str] = None
+
+    def _set_state(self, new_state: str, error_msg: Optional[str] = None) -> None:
+        """Set state and signal ready event if terminal state reached.
+
+        Args:
+            new_state: New state value ("initialized", "running", "error", "stopping", "stopped").
+            error_msg: Optional error message when transitioning to "error" state.
+        """
+        self.state = new_state
+        if error_msg:
+            self._error_message = error_msg
+        # Signal ready event when job reaches a terminal state (running, error, stopped)
+        if new_state in ("running", "error", "stopped"):
+            self._ready_event.set()
+
+    def wait_until_ready(self, timeout: float = 10.0) -> bool:
+        """Wait for job to reach running or error state.
+
+        Blocks until the job thread signals that hooks have been loaded
+        successfully (state="running") or an error occurred (state="error").
+
+        Args:
+            timeout: Maximum seconds to wait (default: 10.0).
+
+        Returns:
+            True if job is running successfully, False if error or timeout.
+        """
+        if self._ready_event.wait(timeout=timeout):
+            return self.state == "running"
+        # Timeout occurred
+        self._error_message = f"Timeout waiting for job to start after {timeout}s"
+        return False
+
+    def get_error(self) -> Optional[str]:
+        """Get error message if job failed.
+
+        Returns:
+            Error message string if job is in error state, None otherwise.
+        """
+        return self._error_message
+
 
     def create_job_script(self):
         self.instrument(self.process_session)
@@ -93,18 +137,39 @@ class Job:
 
 
     def invoke_handle_hooking(self):
-        if self.is_script_created == False:
-            self.instrument(self.process_session)
-            self.is_script_created = True
-        self.script.on("message", self.wrap_custom_hooking_handler_with_job_id(self.custom_hooking_handler))
-        self.script.load()
-        self.state = "running"
-        self.logger.info("[+] hooks successfully loaded")
+        try:
+            if self.is_script_created == False:
+                self.instrument(self.process_session)
+                self.is_script_created = True
+            self.script.on("message", self.wrap_custom_hooking_handler_with_job_id(self.custom_hooking_handler))
+            self.script.load()
+            self._set_state("running")
+            self.logger.info("[+] hooks successfully loaded")
 
-        #if self.is_running_as_thread:
-        # Keep the thread alive to handle messages until stop_event is set
-        while not self.stop_event.is_set():
-            self.stop_event.wait(1) # Sleep for 1 second and check again
+            #if self.is_running_as_thread:
+            # Keep the thread alive to handle messages until stop_event is set
+            while not self.stop_event.is_set():
+                self.stop_event.wait(1) # Sleep for 1 second and check again
+        except frida.TransportError as e:
+            error_msg = f"TransportError during script load: {e} - target app may have crashed or restarted"
+            self._set_state("error", error_msg)
+            self.logger.error(f"[-] {error_msg}")
+        except frida.InvalidOperationError as e:
+            error_msg = f"InvalidOperationError during script load: {e}"
+            self._set_state("error", error_msg)
+            self.logger.error(f"[-] {error_msg}")
+        except frida.ProcessNotFoundError as e:
+            error_msg = f"ProcessNotFoundError: Target process no longer exists: {e}"
+            self._set_state("error", error_msg)
+            self.logger.error(f"[-] {error_msg}")
+        except frida.ProtocolError as e:
+            error_msg = f"ProtocolError: Connection issue with target: {e}"
+            self._set_state("error", error_msg)
+            self.logger.error(f"[-] {error_msg}")
+        except Exception as e:
+            error_msg = f"Unexpected error in hook thread: {type(e).__name__}: {e}"
+            self._set_state("error", error_msg)
+            self.logger.error(f"[-] {error_msg}")
 
 
     def wrap_custom_hooking_handler_with_job_id(self, handler):
@@ -137,6 +202,12 @@ class Job:
     def close_job(self, timeout: float = 5.0) -> bool:
         """Stop the job and cleanup resources.
 
+        Uses a staged shutdown approach:
+        1. Set stop_event FIRST to signal thread to exit wait loop
+        2. Wait briefly for thread to notice stop_event
+        3. Try to unload script (may hang if connection broken)
+        4. Set final stopped state
+
         Args:
             timeout: Maximum seconds to wait for thread to stop.
                      Default 5.0 seconds. Use 0 for no wait.
@@ -144,24 +215,31 @@ class Job:
         Returns:
             True if job stopped cleanly, False if timed out.
         """
-        self.state = "stopping"
+        self._set_state("stopping")
+
+        # Step 1: Signal thread to exit wait loop FIRST
         self.stop_event.set()
 
+        # Step 2: Wait for thread to notice stop_event (short timeout)
+        thread_timeout = min(1.0, timeout) if timeout > 0 else 1.0
         timed_out = False
         if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=timeout if timeout > 0 else None)
+            self.thread.join(timeout=thread_timeout)
             if self.thread.is_alive():
                 self.logger.warning(
-                    f"Job {self.job_id} thread did not stop within {timeout}s"
+                    f"Job {self.job_id} thread did not stop within {thread_timeout}s"
                 )
                 timed_out = True
 
-        # Try to unload script even if thread timed out
+        # Step 3: Try to unload script (may hang if connection broken)
         if self.script:
             try:
                 self.script.unload()
             except Exception as e:
-                self.logger.warning(f"Error unloading script: {e}")
+                self.logger.warning(f"Script unload failed (connection may be broken): {e}")
+
+        # Step 4: Set final state
+        self._set_state("stopped")
 
         status = "timed out" if timed_out else "stopped"
         self.logger.info(f"Job {self.job_id} {status}")
