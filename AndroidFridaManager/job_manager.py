@@ -302,9 +302,42 @@ class JobManager(object):
 
 
 
-    def setup_frida_session(self, target_process, custom_hooking_handler_name, should_spawn=True,foreground=False):
+    def setup_frida_session(self, target_process, custom_hooking_handler_name, should_spawn=True, foreground=False, device=None):
+        """Set up a Frida session for instrumenting a target process.
+
+        Args:
+            target_process: Package name to spawn or PID to attach to.
+            custom_hooking_handler_name: Callback for handling Frida messages.
+            should_spawn: If True, spawn the process; if False, attach to existing.
+            foreground: If True, attach to the frontmost application.
+            device: Pre-initialized Frida device to use. If provided, skips device
+                   creation. This is critical for TUI mode where Frida's GLib-based
+                   device enumeration can deadlock with Textual's event loop.
+        """
         self.first_instrumenation_script = custom_hooking_handler_name
-        self.device = self.setup_frida_handler(self.host, self.enable_spawn_gating)
+
+        # Use provided device OR create new one
+        if device is not None:
+            self.device = device
+            self.logger.info(f"Using pre-initialized Frida device: {device.name}")
+            # Register child/spawn handlers even for pre-initialized device
+            # Without this, forked child processes won't be instrumented
+            def on_child_added(child):
+                self.logger.info(f"Attached to child process with pid {child.pid}")
+                if callable(self.first_instrumenation_script):
+                    self.first_instrumenation_script(device.attach(child.pid))
+                device.resume(child.pid)
+            device.on("child_added", on_child_added)
+            if enable_spawn_gating:
+                def on_spawn_added(spawn):
+                    self.logger.info(f"Process spawned with pid {spawn.pid}. Name: {spawn.identifier}")
+                    if callable(self.first_instrumenation_script):
+                        self.first_instrumenation_script(device.attach(spawn.pid))
+                    device.resume(spawn.pid)
+                device.enable_spawn_gating()
+                device.on("spawn_added", on_spawn_added)
+        else:
+            self.device = self.setup_frida_handler(self.host, self.enable_spawn_gating)
 
         try:
             if should_spawn:
@@ -549,7 +582,12 @@ class JobManager(object):
         :return: Frida Device object
         """
         try:
-            if len(host) > 4:
+            # Check if device already initialized (for TUI thread-safety)
+            # This allows callers to pre-inject a device initialized on the main thread
+            if hasattr(self, 'device') and self.device is not None:
+                device = self.device
+                self.logger.debug("Reusing pre-initialized Frida device")
+            elif len(host) > 4:
                 # Remote device connection
                 device = frida.get_device_manager().add_remote_device(host)
             elif self._device_serial:
