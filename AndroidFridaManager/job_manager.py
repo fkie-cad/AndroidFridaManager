@@ -328,7 +328,7 @@ class JobManager(object):
                     self.first_instrumenation_script(device.attach(child.pid))
                 device.resume(child.pid)
             device.on("child_added", on_child_added)
-            if enable_spawn_gating:
+            if self.enable_spawn_gating:
                 def on_spawn_added(spawn):
                     self.logger.info(f"Process spawned with pid {spawn.pid}. Name: {spawn.identifier}")
                     if callable(self.first_instrumenation_script):
