@@ -4,3 +4,4 @@
 from .FridaManager import FridaManager, main
 from .job import Job, FridaBasedException
 from .job_manager import JobManager
+from .adb import ADB, RootADB, SuADB, MagiskADB

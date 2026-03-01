@@ -7,10 +7,12 @@ coordinating multiple instrumentation jobs on Android devices.
 """
 
 import atexit
-import subprocess
+import concurrent.futures
 import frida
+import shlex
 from typing import Optional, Dict, Union, List, Callable
 from .job import Job, FridaBasedException
+from .adb import ADB
 import time
 import re
 import logging
@@ -30,7 +32,7 @@ class JobManager(object):
         pid: Process ID (-1 if attach mode).
     """
 
-    def __init__(self, host="", enable_spawn_gating=False, device_serial: Optional[str] = None) -> None:
+    def __init__(self, host="", enable_spawn_gating=False, device_serial: Optional[str] = None, adb: Optional["ADB"] = None) -> None:
         """Init a new job manager with optional device targeting.
 
         Args:
@@ -47,15 +49,15 @@ class JobManager(object):
         self.device = None
         self.package_name = ""
         self.enable_spawn_gating = enable_spawn_gating
-        self.first_instrumenation_script = None
+        self.first_instrumentation_script = None
         self.last_created_job = None
         self.init_last_job = False
         self.logger = logging.getLogger(__name__)
         self._ensure_logging_setup()
 
-        # Multi-device support
-        self._device_serial = device_serial
-        self._multiple_devices = self._check_multiple_devices()
+        # ADB wrapper
+        self.adb = adb if adb is not None else ADB.find(device_id=device_serial)
+        self._device_serial = self.adb.device_id
 
         # Hook coordination (NEW)
         self._hook_registry: Dict[str, str] = {}  # hook_target -> job_id
@@ -79,37 +81,6 @@ class JobManager(object):
             handler.setFormatter(formatter)
             root_logger.addHandler(handler)
 
-    def _check_multiple_devices(self) -> bool:
-        """Check if multiple devices are connected."""
-        try:
-            result = subprocess.run(
-                ['adb', 'devices'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            # Count device lines (skip header)
-            device_count = sum(
-                1 for line in result.stdout.strip().split('\n')[1:]
-                if line.strip() and '\tdevice' in line
-            )
-            return device_count > 1
-        except Exception:
-            return False
-
-    def _build_adb_command(self, args: List[str]) -> List[str]:
-        """
-        Build ADB command with device targeting if needed.
-
-        :param args: ADB command arguments (without 'adb' prefix)
-        :return: Complete command list including device targeting
-        """
-        cmd = ['adb']
-        if self._device_serial and self._multiple_devices:
-            cmd.extend(['-s', self._device_serial])
-        cmd.extend(args)
-        return cmd
-
     @property
     def device_serial(self) -> Optional[str]:
         """Get the current target device serial."""
@@ -117,9 +88,8 @@ class JobManager(object):
 
     @device_serial.setter
     def device_serial(self, serial: str) -> None:
-        """Set the target device serial."""
+        self.adb = ADB.find(device_id=serial)
         self._device_serial = serial
-        self._multiple_devices = self._check_multiple_devices()
 
     def cleanup(self) -> None:
         """
@@ -134,7 +104,7 @@ class JobManager(object):
             self.logger.info("[*] Program closed. Stopping active jobs...")
             self.stop_jobs()
 
-        print("\n[*] Have a nice day!")
+        self.logger.info("[*] Have a nice day!")
 
 
     def job_list(self):
@@ -143,15 +113,6 @@ class JobManager(object):
 
     def running_jobs(self):
         return [job_id for job_id, job in self.jobs.items() if job.state == "running"]
-
-    '''
-    # only used for debugging
-    def running_jobs2(self):
-        tuple_jobs = [job for job in self.jobs.items()]
-        for job_id, job in tuple_jobs:
-            self.logger.debug(f"Job state of Job {job_id} in state {job.state}")
-        return tuple_jobs
-    '''
 
     def spawn(self, target_process):
         """Spawn a new process and attach to it.
@@ -186,14 +147,7 @@ class JobManager(object):
         Returns:
             Process ID of the spawned (paused) process.
         """
-        self._mode = "spawn"
-        self.package_name = target_process
-        self.logger.info(f"[*] spawning app (paused): {target_process}")
-        pid = self.device.spawn(target_process)
-        self.process_session = self.device.attach(pid)
-        self.pid = pid
-        self._paused = True
-        # Mark that auto-resume should NOT happen
+        pid = self.spawn(target_process)
         self.is_first_job = False  # Prevent auto-resume in start_job()
         self.logger.info(f"Spawned {target_process} with PID {pid} (PAUSED - awaiting manual resume)")
         return pid
@@ -239,34 +193,27 @@ class JobManager(object):
         """
         if main_activity:
             self.package_name = package_name
-            # Prepare the base command for starting the app with main activity
-            cmd = self._build_adb_command(['shell', 'am', 'start', '-n', f'{package_name}/{main_activity}'])
+            cmd_parts = f"am start -n {package_name}/{main_activity}"
 
-            # Add extras if provided
             if extras:
                 for key, value in extras.items():
                     if isinstance(value, bool):
-                        cmd.extend(['--ez', key, 'true' if value else 'false'])
+                        cmd_parts += f" --ez {shlex.quote(key)} {'true' if value else 'false'}"
                     elif isinstance(value, str):
-                        cmd.extend(['--es', key, value])
-        else:
-            # Command to start the app using monkey if no main activity is provided
-            cmd = self._build_adb_command(['shell', 'monkey', '-p', package_name, '-c', 'android.intent.category.LAUNCHER', '1'])
+                        cmd_parts += f" --es {shlex.quote(key)} {shlex.quote(value)}"
 
-        # Run the command and capture the output
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = self.adb.shell(cmd_parts, timeout=10)
+        else:
+            result = self.adb.shell(f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1", timeout=10)
 
         # Extract the PID from the output
         pid = None
         if 'ThisTime' in result.stdout:
-            # `am start` command includes the PID in the output
             pid_match = re.search(r'(?<=ThisTime: \d+\s)Proc=\w+,\s(\d+)', result.stdout)
             if pid_match:
                 pid = int(pid_match.group(1))
         elif 'Events injected' in result.stdout:
-            # `monkey` command does not provide PID directly, need to get it separately
-            pid_cmd = self._build_adb_command(['shell', 'pidof', package_name])
-            pid_result = subprocess.run(pid_cmd, capture_output=True, text=True, check=True)
+            pid_result = self.adb.shell(f"pidof {package_name}")
             if pid_result.stdout:
                 pid = int(pid_result.stdout.split()[0])
 
@@ -298,11 +245,13 @@ class JobManager(object):
             self.process_session = self.device.attach(target_process)
         else:
             self.logger.info(f"[*] attaching to app: {target_process}")
-            self.process_session = self.device.attach(int(target_process) if target_process.isnumeric() else target_process)
+            self.process_session = self.device.attach(
+                int(target_process) if target_process.isnumeric() else target_process
+            )
 
 
 
-    def setup_frida_session(self, target_process, custom_hooking_handler_name, should_spawn=True, foreground=False, device=None):
+    def setup_frida_session(self, target_process, custom_hooking_handler_name, should_spawn=True, foreground=False):
         """Set up a Frida session for instrumenting a target process.
 
         Args:
@@ -310,40 +259,15 @@ class JobManager(object):
             custom_hooking_handler_name: Callback for handling Frida messages.
             should_spawn: If True, spawn the process; if False, attach to existing.
             foreground: If True, attach to the frontmost application.
-            device: Pre-initialized Frida device to use. If provided, skips device
-                   creation. This is critical for TUI mode where Frida's GLib-based
-                   device enumeration can deadlock with Textual's event loop.
         """
-        self.first_instrumenation_script = custom_hooking_handler_name
-
-        # Use provided device OR create new one
-        if device is not None:
-            self.device = device
-            self.logger.info(f"Using pre-initialized Frida device: {device.name}")
-            # Register child/spawn handlers even for pre-initialized device
-            # Without this, forked child processes won't be instrumented
-            def on_child_added(child):
-                self.logger.info(f"Attached to child process with pid {child.pid}")
-                if callable(self.first_instrumenation_script):
-                    self.first_instrumenation_script(device.attach(child.pid))
-                device.resume(child.pid)
-            device.on("child_added", on_child_added)
-            if self.enable_spawn_gating:
-                def on_spawn_added(spawn):
-                    self.logger.info(f"Process spawned with pid {spawn.pid}. Name: {spawn.identifier}")
-                    if callable(self.first_instrumenation_script):
-                        self.first_instrumenation_script(device.attach(spawn.pid))
-                    device.resume(spawn.pid)
-                device.enable_spawn_gating()
-                device.on("spawn_added", on_spawn_added)
-        else:
-            self.device = self.setup_frida_handler(self.host, self.enable_spawn_gating)
+        self.first_instrumentation_script = custom_hooking_handler_name
+        self.device = self.setup_frida_handler(self.host, self.enable_spawn_gating)
 
         try:
             if should_spawn:
                 self.pid = self.spawn(target_process)
             else:
-                self.attach_app(target_process,foreground)
+                self.attach_app(target_process, foreground)
         except frida.TimedOutError as te:
             raise FridaBasedException(f"TimeOutError: {te}")
         except frida.ProcessNotFoundError as pe:
@@ -380,7 +304,7 @@ class JobManager(object):
                 self.init_last_job = False
                 if self.is_first_job:
                     self.is_first_job = False
-                    self.first_instrumenation_script = custom_hooking_handler_name
+                    self.first_instrumentation_script = custom_hooking_handler_name
                     if self.pid != -1:
                         self.device.resume(self.pid)
                         time.sleep(1) # without it Java.perform silently fails
@@ -431,7 +355,7 @@ class JobManager(object):
                 job.run_job()
                 if self.is_first_job:
                     self.is_first_job = False
-                    self.first_instrumenation_script = custom_hooking_handler_name
+                    self.first_instrumentation_script = custom_hooking_handler_name
                     if self.pid != -1:
                         self.device.resume(self.pid)
                         self._paused = False  # Mark as resumed
@@ -502,8 +426,7 @@ class JobManager(object):
 
 
     def get_last_created_job(self):
-        if self.last_created_job:
-            return self.last_created_job
+        return self.last_created_job
 
 
     def get_job_by_id(self, job_id):
@@ -525,8 +448,6 @@ class JobManager(object):
         if not self.process_session:
             return True
 
-        import concurrent.futures
-
         def _detach():
             self.process_session.detach()
 
@@ -547,8 +468,7 @@ class JobManager(object):
 
 
     def stop_app(self, app_package):
-        cmd = self._build_adb_command(["shell", "am", "force-stop", app_package])
-        subprocess.run(cmd)
+        self.adb.shell(f"am force-stop {app_package}")
 
 
     def stop_app_with_last_job(self, last_job, app_package):
@@ -564,13 +484,11 @@ class JobManager(object):
             self.stop_job_with_id(job_id)
 
         self.detach_from_app()
-        cmd = self._build_adb_command(["shell", "am", "force-stop", app_package])
-        subprocess.run(cmd)
+        self.adb.shell(f"am force-stop {app_package}")
 
 
     def kill_app(self, pid):
-        cmd = self._build_adb_command(["shell", "kill", str(pid)])
-        subprocess.run(cmd)
+        self.adb.shell(f"kill {pid}")
 
 
     def setup_frida_handler(self, host="", enable_spawn_gating=False):
@@ -582,12 +500,7 @@ class JobManager(object):
         :return: Frida Device object
         """
         try:
-            # Check if device already initialized (for TUI thread-safety)
-            # This allows callers to pre-inject a device initialized on the main thread
-            if hasattr(self, 'device') and self.device is not None:
-                device = self.device
-                self.logger.debug("Reusing pre-initialized Frida device")
-            elif len(host) > 4:
+            if len(host) > 4:
                 # Remote device connection
                 device = frida.get_device_manager().add_remote_device(host)
             elif self._device_serial:
@@ -610,15 +523,15 @@ class JobManager(object):
             # to handle forks
             def on_child_added(child):
                 self.logger.info(f"Attached to child process with pid {child.pid}")
-                if callable(self.first_instrumenation_script):
-                    self.first_instrumenation_script(device.attach(child.pid))
+                if callable(self.first_instrumentation_script):
+                    self.first_instrumentation_script(device.attach(child.pid))
                 device.resume(child.pid)
 
             # if the target process is starting another process
             def on_spawn_added(spawn):
                 self.logger.info(f"Process spawned with pid {spawn.pid}. Name: {spawn.identifier}")
-                if callable(self.first_instrumenation_script):
-                    self.first_instrumenation_script(device.attach(spawn.pid))
+                if callable(self.first_instrumentation_script):
+                    self.first_instrumentation_script(device.attach(spawn.pid))
                 device.resume(spawn.pid)
 
             device.on("child_added", on_child_added)
