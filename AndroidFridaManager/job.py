@@ -143,6 +143,7 @@ class Job:
                 self.instrument(self.process_session)
                 self.is_script_created = True
             self.script.on("message", self.wrap_custom_hooking_handler_with_job_id(self.custom_hooking_handler))
+            self.script.on("destroyed", self._on_script_destroyed)
             self.script.load()
             self._set_state("running")
             self.logger.info("[+] hooks successfully loaded")
@@ -182,6 +183,10 @@ class Job:
 
         return wrapped_handler
 
+    def _on_script_destroyed(self):
+        if self.state == "running":
+            self._set_state("error", "script destroyed externally")
+            self.logger.warning(f"Job {self.job_id} script destroyed externally")
 
     def instrument(self, process_session,runtime="qjs"):
             try:

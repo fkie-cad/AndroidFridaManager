@@ -141,7 +141,7 @@ class JobManager(object):
             self.device = self.setup_frida_handler(self.host, self.enable_spawn_gating)
         self.logger.info("[*] spawning app: "+ target_process)
         pid = self.device.spawn(target_process)
-        self.process_session = self.device.attach(pid)
+        self._attach_with_detach_handler(pid)
         self.pid = pid
         self._paused = True  # Spawned processes start paused
         self.logger.info(f"Spawned {target_process} with PID {pid}")
@@ -271,10 +271,10 @@ class JobManager(object):
 
         if isinstance(target_process, int):
             self.logger.info(f"[*] attaching to PID: {target_process}")
-            self.process_session = self.device.attach(target_process)
+            self._attach_with_detach_handler(target_process)
         else:
             self.logger.info(f"[*] attaching to app: {target_process}")
-            self.process_session = self.device.attach(
+            self._attach_with_detach_handler(
                 int(target_process) if target_process.isnumeric() else target_process
             )
 
@@ -879,6 +879,23 @@ class JobManager(object):
         else:
             raise ValueError(f"Job with ID {job_id} not found.")
 
+
+    def _attach_with_detach_handler(self, target):
+        self.process_session = self.device.attach(target)
+        self.process_session.on("detached", self._on_session_detached)
+        return self.process_session
+
+    def _on_session_detached(self, reason, crash):
+        self.logger.warning(
+            "Session detached: reason=%s%s",
+            reason,
+            f", crash={crash}" if crash else "",
+        )
+        self.process_session = None
+        self._paused = False
+        for job_id, job in list(self.jobs.items()):
+            if job.state == "running":
+                job._set_state("error", f"session detached: {reason}")
 
     def detach_from_app(self, timeout: float = 3.0) -> bool:
         """Detach from the current app session.
