@@ -7,6 +7,7 @@ jobs, including script loading, message handling, and lifecycle management.
 """
 
 import threading
+import concurrent.futures
 import frida
 import uuid
 import logging
@@ -231,12 +232,30 @@ class Job:
                 )
                 timed_out = True
 
-        # Step 3: Try to unload script (may hang if connection broken)
+        # Step 3: Try to unload script under a bounded timeout.
+        # script.unload() has NO internal timeout and blocks indefinitely when
+        # unloading on a still-LIVE process whose agent has pending RPC (the
+        # 1s thread.join above does not interrupt a frida call in flight). Run
+        # it on a throwaway executor and abandon it on timeout. We do NOT use
+        # `with ThreadPoolExecutor()` because its __exit__ does shutdown(
+        # wait=True), which would re-block on the very hang we are bounding;
+        # shutdown(wait=False) lets the orphan finish (or die at process exit).
         if self.script:
+            unload_timeout = min(timeout, 3.0) if timeout > 0 else 3.0
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                self.script.unload()
+                future = executor.submit(self.script.unload)
+                future.result(timeout=unload_timeout)
+            except concurrent.futures.TimeoutError:
+                self.logger.warning(
+                    f"Job {self.job_id} script.unload() timed out after "
+                    f"{unload_timeout}s (process likely still live); abandoning"
+                )
+                timed_out = True
             except Exception as e:
                 self.logger.warning(f"Script unload failed (connection may be broken): {e}")
+            finally:
+                executor.shutdown(wait=False)
 
         # Step 4: Set final state
         self._set_state("stopped")
