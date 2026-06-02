@@ -170,8 +170,20 @@ class FridaManager():
 
         frida_bin = (self.frida_install_dst if frida_server_path is None else frida_server_path) + "frida-server"
 
+        # On Android 15+ the adb shell environment lacks BOOTCLASSPATH and
+        # DEX2OATBOOTCLASSPATH which causes frida-server to crash.  Extract
+        # them from Zygote's environment before launching the server.
+        env_setup = (
+            "ZPID=$(pidof zygote64 || pidof zygote); "
+            "if [ -n \"$ZPID\" ]; then "
+            "export BOOTCLASSPATH=$(cat /proc/$ZPID/environ | tr '\\0' '\\n' | grep '^BOOTCLASSPATH=' | cut -d= -f2-); "
+            "export DEX2OATBOOTCLASSPATH=$(cat /proc/$ZPID/environ | tr '\\0' '\\n' | grep '^DEX2OATBOOTCLASSPATH=' | cut -d= -f2-); "
+            "fi; "
+        )
+        frida_cmd = env_setup + frida_bin
+
         try:
-            process = self.adb.root_background_shell(frida_bin)
+            process = self.adb.root_background_shell(frida_cmd)
             # Give it a moment to start and potentially fail
             time.sleep(1)
 
@@ -188,15 +200,63 @@ class FridaManager():
                 if self.verbose:
                     self.logger.info("[*] frida-server started successfully in background")
 
-            if self.is_frida_server_running():
+            # The process exists, but device.spawn()/attach() fails with
+            # frida-core's "need Gadget to attach on jailed Android" fallback
+            # if the control socket is not accepting connections yet. Wait
+            # until the frida CLIENT can actually reach the server, not just
+            # until pidof finds the process.
+            if self._wait_until_frida_ready():
+                if self.verbose:
+                    self.logger.info("[*] frida-server is ready (client can attach)")
                 return True
             else:
-                self.logger.error("frida-server does not seem to be running after start command")
+                self.logger.error(
+                    "frida-server process is up but the frida client could not "
+                    "reach it in time (control socket not ready)"
+                )
                 return False
 
         except Exception as e:
             self.logger.error(f"Error starting frida-server: {e}")
             return False
+
+
+    def _wait_until_frida_ready(self, timeout: float = 15.0, interval: float = 0.5) -> bool:
+        """Block until the frida CLIENT can actually reach frida-server.
+
+        ``is_frida_server_running()`` only confirms the *process* exists (via
+        ``pidof``). ``device.spawn()``/``attach()`` raise frida-core's
+        "need Gadget to attach on jailed Android" fallback when called before
+        the server's control socket is ready. Probe ``enumerate_processes()``
+        in a retry loop so callers can spawn/attach immediately after a start.
+
+        :param timeout: Maximum seconds to wait for client reachability.
+        :type timeout: float
+        :param interval: Seconds between probes.
+        :type interval: float
+        :return: True if the client reached the server within *timeout*.
+        :rtype: bool
+        """
+        deadline = time.time() + timeout
+        last_err = None
+        while time.time() < deadline:
+            try:
+                if self.is_remote and self.device_socket:
+                    device = frida.get_device_manager().add_remote_device(
+                        self.device_socket
+                    )
+                elif self._device_serial:
+                    device = frida.get_device(self._device_serial, timeout=2)
+                else:
+                    device = frida.get_usb_device(timeout=2)
+                device.enumerate_processes()
+                return True
+            except Exception as e:
+                last_err = e
+                time.sleep(interval)
+        if last_err is not None:
+            self.logger.debug(f"frida readiness probe failed: {last_err}")
+        return False
 
 
     def is_frida_server_running(self) -> bool:
@@ -241,6 +301,42 @@ class FridaManager():
             return False
 
 
+    def get_installed_server_version(self) -> Optional[str]:
+        """Return the version reported by `frida-server --version` on the device.
+
+        :return: Version string like "17.9.11", or None if the binary is missing
+            or doesn't respond with a version number.
+        :rtype: Optional[str]
+        """
+        binary = self.frida_install_dst + "frida-server"
+        try:
+            result = self.adb.shell(f"{binary} --version")
+            out = (result.stdout or "").strip()
+        except Exception as e:
+            self.logger.debug(f"Could not query frida-server version: {e}")
+            return None
+        return out if re.match(r"^\d+\.\d+\.\d+", out) else None
+
+
+    def list_available_versions(self, limit: int = 15) -> List[str]:
+        """Fetch recent frida release tags from GitHub.
+
+        :param limit: Maximum number of releases to return (newest first).
+        :type limit: int
+        :return: Version strings like ``["17.9.11", "17.9.10", ...]``. Empty
+            list on network failure — caller decides on fallback behavior.
+        :rtype: List[str]
+        """
+        url = "https://api.github.com/repos/frida/frida/releases"
+        try:
+            res = requests.get(url, timeout=10, params={"per_page": limit})
+            res.raise_for_status()
+            return [r["tag_name"] for r in res.json() if "tag_name" in r]
+        except requests.RequestException as e:
+            self.logger.warning(f"Could not fetch frida releases: {e}")
+            return []
+
+
     def stop_frida_server(self):
         if self.is_device_rooted:
             self.adb.root_shell("/system/bin/killall frida-server")
@@ -255,7 +351,7 @@ class FridaManager():
         self._adb_remove_file_if_exist(cmd)
 
 
-    def install_frida_server(self, dst_dir=None, version="latest"):
+    def install_frida_server(self, dst_dir=None, version=None):
         """
         Install the frida server binary on the Android device.
         This includes downloading the frida-server, decompress it and pushing it to the Android device.
@@ -264,11 +360,22 @@ class FridaManager():
 
         :param dst_dir: The destination folder where the frida-server binary should be installed (pushed).
         :type dst_dir: string
-        :param version: The version. By default the latest version will be used.
+        :param version: The version to install. When *None* (default) the version
+            of the host ``frida`` Python package is used so that client and server
+            stay in sync. Pass ``"latest"`` to pull the newest release from GitHub.
         :type version: string
         :raises RuntimeError: If device is not rooted
 
         """
+        if version is None:
+            try:
+                import frida as _frida
+                version = _frida.__version__
+                self.logger.info(f"Auto-detected frida version from host package: {version}")
+            except Exception:
+                version = "latest"
+                self.logger.warning("Could not detect host frida version, falling back to 'latest'")
+
         # Check root access BEFORE downloading - fail fast to save time
         if not self.is_device_rooted:
             self.logger.error(
@@ -295,20 +402,32 @@ class FridaManager():
             return True
 
 
-    # by default the latest frida-server version will be downloaded
-    def download_frida_server(self, path, version="latest"):
+    # by default the frida-server version matching the host package is downloaded
+    def download_frida_server(self, path, version=None):
         """
-        Downloads a frida server. By default the latest version is used.
-        If you want to download a specific version you have to provide it trough the version parameter.
+        Downloads a frida server. By default the version matching the host
+        ``frida`` Python package is used. Pass ``"latest"`` to fetch the
+        newest release from GitHub, or a specific version string like
+        ``"16.3.3"``.
 
         :param path: The path where the compressed frida-server should be downloded.
         :type path: string
-        :param version: The version. By default the latest version will be used.
+        :param version: The version. When *None* the host frida package version is
+            used. Pass ``"latest"`` for the newest GitHub release.
         :type version: string
 
         :return: The location of the downloaded frida server in its compressed form.
         :rtype: string
         """
+        if version is None:
+            try:
+                import frida as _frida
+                version = _frida.__version__
+                self.logger.info(f"Auto-detected frida version from host package: {version}")
+            except Exception:
+                version = "latest"
+                self.logger.warning("Could not detect host frida version, falling back to 'latest'")
+
         url = self.get_frida_server_for_android_url(version)
         with open(path+"/frida-server","wb") as fsb:
             res = requests.get(url)
