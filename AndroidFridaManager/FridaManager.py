@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import base64
 import frida
 import os
 import sys
@@ -170,17 +171,35 @@ class FridaManager():
 
         frida_bin = (self.frida_install_dst if frida_server_path is None else frida_server_path) + "frida-server"
 
-        # On Android 15+ the adb shell environment lacks BOOTCLASSPATH and
-        # DEX2OATBOOTCLASSPATH which causes frida-server to crash.  Extract
-        # them from Zygote's environment before launching the server.
-        env_setup = (
-            "ZPID=$(pidof zygote64 || pidof zygote); "
-            "if [ -n \"$ZPID\" ]; then "
-            "export BOOTCLASSPATH=$(cat /proc/$ZPID/environ | tr '\\0' '\\n' | grep '^BOOTCLASSPATH=' | cut -d= -f2-); "
-            "export DEX2OATBOOTCLASSPATH=$(cat /proc/$ZPID/environ | tr '\\0' '\\n' | grep '^DEX2OATBOOTCLASSPATH=' | cut -d= -f2-); "
-            "fi; "
-        )
-        frida_cmd = env_setup + frida_bin
+        # frida-server 17.x boots an ART/Dalvik runtime at startup
+        # (JNI_CreateJavaVM). On Android 14/15 ART aborts (SIGABRT) unless the
+        # environment that init hands to zygote is present -- BOOTCLASSPATH,
+        # DEX2OATBOOTCLASSPATH and the ANDROID_* roots -- which a bare adb/su
+        # shell does not inherit. Forward zygote's full environment, then exec
+        # frida-server. The launcher is delivered base64-encoded over stdin so
+        # the (quote-free) launch command survives every su/elevation wrapper
+        # unchanged and nothing is written to the device filesystem.
+        #
+        # IMPORTANT: do NOT redirect frida-server's stdio. The success check
+        # below relies on the live server holding this shell's stdout/stderr
+        # pipe open (process.poll() stays None while it runs; the pipe closes if
+        # it crashes). Redirecting to /dev/null would make a good start look
+        # like an immediate exit and report a false failure.
+        launcher = f"""ZPID=$(pidof zygote64 || pidof zygote)
+if [ -n "$ZPID" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      ANDROID_SOCKET_*) ;;
+      *=*) export "$line" ;;
+    esac
+  done <<EOF
+$(tr '\\0' '\\n' < /proc/$ZPID/environ)
+EOF
+fi
+exec {frida_bin}
+"""
+        b64 = base64.b64encode(launcher.encode()).decode()
+        frida_cmd = f"echo {b64} | base64 -d | sh"
 
         try:
             process = self.adb.root_background_shell(frida_cmd)
@@ -193,8 +212,14 @@ class FridaManager():
                 if stderr_text and "Address already in use" in stderr_text:
                     self.logger.info("[*] frida-server is already running on the device")
                     return True
+                elif stderr_text and stderr_text.strip():
+                    self.logger.error(f"Failed to start frida-server: {stderr_text.strip()}")
+                    return False
                 else:
-                    self.logger.error(f"Failed to start frida-server: {stderr_text}")
+                    self.logger.error(
+                        "frida-server exited immediately with no output -- likely an "
+                        "ART/SIGABRT crash on startup; check `adb logcat` for a tombstone"
+                    )
                     return False
             else:
                 if self.verbose:
