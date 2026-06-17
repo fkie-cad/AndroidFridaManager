@@ -50,6 +50,7 @@ class ADB:
         full_cmd = self._build_cmd(["shell", self._elevate_background(cmd)])
         return subprocess.Popen(
             full_cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
