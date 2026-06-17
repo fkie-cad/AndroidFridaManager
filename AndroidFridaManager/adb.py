@@ -3,6 +3,7 @@
 import logging
 import shutil
 import subprocess
+import time
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ class ADB:
     # ── factory ──────────────────────────────────────────────────────
 
     @staticmethod
-    def find(device_id: Optional[str] = None) -> "ADB":
+    def find(device_id: Optional[str] = None, prefer_adb_root: bool = False) -> "ADB":
         """Detect the best ADB subclass for the connected device."""
 
         if not shutil.which("adb"):
@@ -171,6 +172,27 @@ class ADB:
                 text=True,
                 timeout=5,
             )
+
+        def _try_adb_root() -> Optional["ADB"]:
+            """Run 'adb root' to restart adbd as root; returns RootADB or None."""
+            try:
+                res = _quick_run("root")
+                out = res.stdout.strip()
+                if "already running as root" in out or "restarting adbd as root" in out:
+                    time.sleep(0.5)
+                    verify = _quick_run("shell", "id", "-u")
+                    if verify.stdout.strip() == "0":
+                        logger.info("Gained root via 'adb root'")
+                        return RootADB(device_id)
+            except subprocess.TimeoutExpired:
+                logger.debug("Timeout during 'adb root'")
+            return None
+
+        # When explicitly requested, try adb root before su escalation
+        if prefer_adb_root:
+            result = _try_adb_root()
+            if result:
+                return result
 
         # 1. Already root (adbd running as root)
         try:

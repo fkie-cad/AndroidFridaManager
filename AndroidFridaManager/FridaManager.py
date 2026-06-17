@@ -20,7 +20,7 @@ from .adb import ADB, RootADB, SuADB, MagiskADB
 
 class FridaManager():
 
-    def __init__(self, is_remote=False, socket="", verbose=False, frida_install_dst="/data/local/tmp/", device_serial: Optional[str] = None, adb: Optional["ADB"] = None):
+    def __init__(self, is_remote=False, socket="", verbose=False, frida_install_dst="/data/local/tmp/", device_serial: Optional[str] = None, adb: Optional["ADB"] = None, prefer_adb_root: bool = False):
         """
         Constructor of the current FridaManager instance
 
@@ -36,6 +36,8 @@ class FridaManager():
         :type device_serial: Optional[str]
         :param adb: Pre-initialised ADB instance. When *None* one is created via ``ADB.find()``.
         :type adb: Optional[ADB]
+        :param prefer_adb_root: When True, attempt ``adb root`` before ``su`` escalation. Useful on emulators and eng/userdebug builds.
+        :type prefer_adb_root: bool
 
         """
         self.is_remote = is_remote
@@ -46,7 +48,7 @@ class FridaManager():
         self.logger = logging.getLogger(__name__)
 
         # ADB wrapper (auto-detects device + root mode)
-        self.adb = adb if adb is not None else ADB.find(device_id=device_serial)
+        self.adb = adb if adb is not None else ADB.find(device_id=device_serial, prefer_adb_root=prefer_adb_root)
         self._device_serial = self.adb.device_id
 
         if self.is_remote:
@@ -594,6 +596,7 @@ def main():
         parser.add_argument('-r','--is_running', required=False, action="store_const", const=True, default=False, help='Checks only if frida-server is running on the Android device or not.')
         parser.add_argument('-d', '--device', type=str, default=None, help='Target device serial (e.g., emulator-5554). Auto-selects if not specified.')
         parser.add_argument('-l', '--list-devices', required=False, action="store_const", const=True, default=False, help='List all connected devices and exit.')
+        parser.add_argument('--adb-root', required=False, action="store_const", const=True, default=False, help='Use "adb root" to restart adbd as root before trying su escalation (useful on emulators and eng/userdebug builds).')
 
         args = parser.parse_args()
 
@@ -610,7 +613,7 @@ def main():
             sys.exit(0)
 
         if args.is_running:
-            afm_obj = FridaManager(device_serial=args.device)
+            afm_obj = FridaManager(device_serial=args.device, prefer_adb_root=args.adb_root)
             if afm_obj.is_frida_server_running():
                 afm_obj.logger.info("[*] frida-server is running on Android device")
             else:
@@ -620,7 +623,7 @@ def main():
 
 
 
-        afm_obj = FridaManager(args.is_remote, args.socket, args.verbose, args.frida_install_dst, device_serial=args.device)
+        afm_obj = FridaManager(args.is_remote, args.socket, args.verbose, args.frida_install_dst, device_serial=args.device, prefer_adb_root=args.adb_root)
     else:
         afm_obj = FridaManager()
 
