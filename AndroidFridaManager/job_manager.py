@@ -337,6 +337,11 @@ class JobManager(object):
                     if self.pid != -1:
                         self.device.resume(self.pid)
                         time.sleep(1) # without it Java.perform silently fails
+                        # The process is now running — keep is_paused() truthful.
+                        # Without this, the spawned-process paused flag stays
+                        # True after this auto-resume path, so callers (e.g. a
+                        # TUI header) show "paused" forever though the app runs.
+                        self._paused = False
         except Exception as fe:
             raise FridaBasedException(f"Frida-Error: {fe}")
 
