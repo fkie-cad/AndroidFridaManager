@@ -1012,6 +1012,155 @@ class JobManager(object):
         except frida.ServerNotRunningError:
             raise FridaBasedException("Frida server not running. Start frida-server and try it again.")
 
+    def setup_gated_session(
+        self,
+        package: str,
+        script_source: str,
+        script_message_handler: Optional[Callable] = None,
+        extra_identifiers: Optional[List[str]] = None,
+        settle_after_gating: float = 2.0,
+        settle_after_forcestop: float = 3.0,
+        wait_for_children: float = 8.0,
+        launch: bool = True,
+    ) -> Dict[int, str]:
+        """Inject one script into a package's main AND zygote-spawned children.
+
+        Spawn-gated multi-process injection. Some apps run their networking in a
+        separate, zygote-spawned child process (e.g. Google's cronet/Lens stack
+        lives in ``<pkg>:search`` / ``<pkg>:interactor``) that is NOT fork()ed
+        from the main process, so :meth:`spawn` / :meth:`attach_app` (single
+        target) and the ``child_added`` signal (fork/exec descendants only) never
+        reach it. This method gates *every* zygote spawn, and for each whose
+        identifier belongs to ``package`` it attaches, loads ``script_source``
+        BEFORE resuming (hooks in place before any code runs, and it beats the
+        Android cached-process freezer that defeats post-hoc attach), then always
+        resumes.
+
+        Proven recipe (the ordering is the whole game):
+
+        1. enable spawn gating, then let it settle;
+        2. ``am force-stop`` the package *while gating is already live* — the
+           non-obvious key: it forces a fresh gated zygote fork. Force-stop
+           before gating (or launching a warm app) means no gated fork happens
+           and ``spawn-added`` never fires for the children;
+        3. (optional) launch via ``monkey`` and wait for the children.
+
+        .. note::
+            **Not wired into Sandroid.** ``BypassService`` still uses the
+            single-target :meth:`setup_frida_session`; this is the building block
+            for a future cronet-aware path (the Tier 4 cronet/BoringSSL hooks in
+            sandroid ``analysis/ssl_unpin.py`` only take effect once they reach
+            the ``:search`` child). A caller would pass the assembled combined
+            bypass source (``BypassService._assemble_source``) as
+            ``script_source`` and a ``(message, data)`` shim around
+            ``BypassService._message_handler`` (which is ``(job, message, data)``)
+            as ``script_message_handler``. Routing for the child is already
+            handled per-UID by sandroid ``core/proxy_manager.py`` ``FocusManager``
+            (the child shares the package UID).
+
+        Caveats:
+
+        * Uses the **hyphenated** ``"spawn-added"`` signal — the frida-python /
+          native (GObject) signal name that actually fires. The
+          ``on_spawn_added`` handler in :meth:`setup_frida_handler` registers the
+          underscore form ``"spawn_added"``, which is why that path does not catch
+          these children.
+        * Do NOT ``device.spawn()`` the app on this path — a manual spawn racing
+          the gated spawn over one device connection closes the connection. Drive
+          the launch via ``am``/``monkey`` (``launch=True``).
+        * Assumes USAP is disabled (``dalvik.vm.usap_pool_enabled=false``); with
+          the USAP pool on, pre-forked pool processes can evade gating — disable
+          it first.
+        * Gating stays ENABLED on return so late children (a ``:search`` that
+          starts on first network use) are still caught; :meth:`reset_session` /
+          :meth:`cleanup` tears the session down. Every gated spawn is resumed in
+          a ``finally`` (matched or not) so an unrelated process is never wedged.
+
+        Args:
+            package: Target package name (matched against each spawn identifier).
+            script_source: Frida script SOURCE (string) loaded into every match.
+            script_message_handler: ``(message, data)`` callback for each child
+                script; a logging default is used when None.
+            extra_identifiers: Extra identifier substrings to also match besides
+                ``package`` (e.g. a renamed child process).
+            settle_after_gating: Seconds to wait after enabling gating.
+            settle_after_forcestop: Seconds to wait after the force-stop.
+            wait_for_children: Seconds to wait after launch for spawns to arrive.
+            launch: When True, launch the package via ``monkey`` after force-stop.
+
+        Returns:
+            ``{pid: identifier}`` for every process the script was injected into.
+        """
+        # pid -> (session, script): keeps the handles alive (no GC) and lets a
+        # caller tear the children down. Lazily created to avoid touching __init__.
+        if not hasattr(self, "_gated_children"):
+            self._gated_children: Dict[int, Tuple] = {}
+
+        device = self.setup_frida_handler(self.host, enable_spawn_gating=False)
+        self.device = device
+        self.package_name = package
+        self._mode = "gated"
+        self.enable_spawn_gating = True
+        matchers = [package] + list(extra_identifiers or [])
+        injected: Dict[int, str] = {}
+
+        def _default_handler(message, data):
+            if message.get("type") == "send":
+                self.logger.info(f"[gated] {message.get('payload')}")
+            elif message.get("type") == "error":
+                self.logger.error(f"[gated] {message.get('description', message)}")
+
+        handler = script_message_handler or _default_handler
+
+        def on_spawn(spawn):
+            ident = spawn.identifier or ""
+            matched = any(m in ident for m in matchers)
+            try:
+                if matched:
+                    self.logger.info(f"[gated] injecting into {ident} (pid {spawn.pid})")
+                    session = device.attach(spawn.pid)
+                    script = session.create_script(script_source)
+                    script.on("message", handler)
+                    script.load()  # MUST load before resume
+                    self._gated_children[spawn.pid] = (session, script)
+                    injected[spawn.pid] = ident
+                    # Treat the exact-name main process as the primary session,
+                    # for parity with the single-target setup_frida_session path.
+                    if ident == package:
+                        self.process_session = session
+                        self.pid = spawn.pid
+            except Exception as e:
+                self.logger.warning(
+                    f"[gated] failed to inject into pid {spawn.pid} ({ident}): {e}"
+                )
+            finally:
+                # ALWAYS resume (matched or not) so an unrelated gated spawn — or a
+                # child we could not inject — is never left suspended.
+                try:
+                    device.resume(spawn.pid)
+                except Exception:
+                    pass
+
+        # Register the handler BEFORE enabling gating so no early spawn is missed.
+        self._gated_spawn_handler = on_spawn  # keep a ref so it is not GC'd
+        device.on("spawn-added", on_spawn)
+        device.enable_spawn_gating()
+        time.sleep(settle_after_gating)
+
+        # Force-stop WHILE gating is live -> forces a fresh gated zygote fork.
+        self.adb.shell(f"am force-stop {package}")
+        time.sleep(settle_after_forcestop)
+
+        if launch:
+            self.adb.shell(f"monkey -p {package} -c android.intent.category.LAUNCHER 1")
+            time.sleep(wait_for_children)
+
+        self.logger.info(
+            f"[gated] spawn-gated injection into {package}: "
+            f"{len(injected)} process(es) -> {list(injected.values())}"
+        )
+        return injected
+
     # ==================== Hook Coordination Methods ====================
 
     def register_hooks(self, job_id: str, hooks: List[str]) -> List[str]:
