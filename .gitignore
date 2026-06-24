@@ -5,3 +5,7 @@ __pycache__/
 venv/
 *.md
 !README.md
+
+# AndroidFridaManager stuff
+env/
+research/
