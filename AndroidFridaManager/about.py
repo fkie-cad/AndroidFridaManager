@@ -2,4 +2,4 @@
 # -*- coding: utf-8 -*-
 
 __author__ = "Daniel Baier"
-__version__ = "2.0.3"
+__version__ = "2.0.4"

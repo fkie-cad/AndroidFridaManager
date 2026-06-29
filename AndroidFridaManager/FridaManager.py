@@ -369,6 +369,64 @@ exec {frida_bin}
             self.logger.warning("Cannot stop frida-server: device not rooted")
 
 
+    def is_process_alive(self, pid: int) -> bool:
+        """Return True iff *pid* is a live process on the target device.
+
+        Membership check against ``get_frida_device().enumerate_processes()``.
+        Spawn-reliability ladders use this to detect a target that crashed off
+        the splash and was relaunched *uninstrumented* right after ``resume()``
+        — the original instrumented pid vanishes while the package keeps the
+        same name, so polling the *specific* pid is the only reliable signal.
+
+        A wedged/unreachable frida-server (transport/protocol error) is itself
+        "not confirmed alive", so this returns False rather than raising — the
+        caller can then decide whether to recover the server. Mirrors the probe
+        style of :meth:`_wait_until_frida_ready`.
+
+        :param pid: The process id to check.
+        :type pid: int
+        :return: True if *pid* is currently enumerated by frida-server.
+        :rtype: bool
+        """
+        try:
+            device = self.get_frida_device()
+            for proc in device.enumerate_processes():
+                if proc.pid == pid:
+                    return True
+            return False
+        except frida.ProcessNotFoundError:
+            return False
+        except Exception as e:
+            self.logger.debug(f"is_process_alive({pid}) probe failed: {e}")
+            return False
+
+
+    def restart_frida_server_and_wait(self, timeout: float = 15.0) -> bool:
+        """Stop then start frida-server, blocking until the client can reach it.
+
+        Recovery primitive for a wedged/crashed frida-server: ``stop`` then
+        ``run`` (which already blocks on :meth:`_wait_until_frida_ready`).
+        ``stop_frida_server`` only sends ``killall`` (asynchronous), so settle
+        briefly before the restart — otherwise ``run_frida_server`` may see the
+        still-dying pid via ``is_frida_server_running`` and early-return without
+        actually restarting. The *timeout* is honoured for the final
+        client-reachability confirmation (on the normal success path
+        ``run_frida_server`` has already confirmed readiness, so it returns
+        promptly; it matters when the internal "already running" early-return
+        skipped the probe).
+
+        :param timeout: Max seconds to wait for client reachability after start.
+        :type timeout: float
+        :return: True if frida-server came back up and the client can reach it.
+        :rtype: bool
+        """
+        self.stop_frida_server()
+        time.sleep(1)
+        if not self.run_frida_server():
+            return False
+        return self._wait_until_frida_ready(timeout=timeout)
+
+
     def remove_frida_server(self, frida_server_path=None):
         cmd = (self.frida_install_dst if frida_server_path is None else frida_server_path) + "frida-server"
 
