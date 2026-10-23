@@ -28,6 +28,9 @@ class _Proc:
 def _make_fm() -> FridaManager:
     fm = FridaManager.__new__(FridaManager)
     fm.logger = logging.getLogger("test-afm")
+    # is_process_alive now gates on readiness (frida-17 jailed trap); these
+    # tests exercise the pid-membership logic, so treat the server as ready.
+    fm.is_frida_server_ready = Mock(return_value=True)
     return fm
 
 

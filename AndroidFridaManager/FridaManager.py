@@ -159,34 +159,97 @@ class FridaManager():
 
     # ==================== Frida Server Management ====================
 
-    def run_frida_server(self, frida_server_path=None):
-        # Check if frida-server is already running
-        if self.is_frida_server_running():
+    # Marker the launcher writes before exec, so log tails only show the latest
+    # launch (the log is appended to, never truncated -- see run_frida_server).
+    FRIDA_SERVER_LAUNCH_MARKER = "=== AndroidFridaManager: frida-server launch"
+
+    @property
+    def frida_server_log_path(self) -> str:
+        """Device path of the log that receives frida-server's stdout/stderr."""
+        return self.frida_install_dst + "frida-server.log"
+
+
+    def run_frida_server(self, frida_server_path=None) -> bool:
+        """Start frida-server detached from adb and wait until the client can use it.
+
+        Skips the launch when a ready server (``access: full``) already exists,
+        restarts a stale/unresponsive one, and verifies the binary first.
+
+        :param frida_server_path: Directory holding ``frida-server`` (defaults
+            to ``frida_install_dst``).
+        :return: True once the frida client can attach/spawn, False otherwise.
+        :rtype: bool
+        """
+        if self.is_frida_server_ready():
             if self.verbose:
-                self.logger.info("[*] frida-server is already running, skipping start")
+                self.logger.info("[*] frida-server is already running and ready, skipping start")
             return True
 
-        # Ensure root access is available
         if not self.is_device_rooted:
             self.logger.error("Cannot start frida-server: device is not rooted")
             return False
 
-        frida_bin = (self.frida_install_dst if frida_server_path is None else frida_server_path) + "frida-server"
+        if not self._stop_stale_frida_server():
+            return False
 
-        # frida-server 17.x boots an ART/Dalvik runtime at startup
-        # (JNI_CreateJavaVM). On Android 14/15 ART aborts (SIGABRT) unless the
-        # environment that init hands to zygote is present -- BOOTCLASSPATH,
-        # DEX2OATBOOTCLASSPATH and the ANDROID_* roots -- which a bare adb/su
-        # shell does not inherit. Forward zygote's full environment, then exec
-        # frida-server. The launcher is delivered base64-encoded over stdin so
-        # the (quote-free) launch command survives every su/elevation wrapper
-        # unchanged and nothing is written to the device filesystem.
-        #
-        # IMPORTANT: do NOT redirect frida-server's stdio. The success check
-        # below relies on the live server holding this shell's stdout/stderr
-        # pipe open (process.poll() stays None while it runs; the pipe closes if
-        # it crashes). Redirecting to /dev/null would make a good start look
-        # like an immediate exit and report a false failure.
+        frida_bin = (self.frida_install_dst if frida_server_path is None else frida_server_path) + "frida-server"
+        if not self._frida_server_binary_exists(frida_bin):
+            self.logger.error(f"frida-server binary not found at {frida_bin} -- call install_frida_server()")
+            return False
+
+        try:
+            logged = self._launch_frida_server(frida_bin)
+        except Exception as e:
+            self.logger.error(f"Error starting frida-server: {e}")
+            return False
+
+        if self._wait_until_frida_ready(timeout=15):
+            if self.verbose:
+                self.logger.info("[*] frida-server is ready (client can attach)")
+            return True
+        self._report_frida_server_start_failure(logged)
+        return False
+
+
+    def _stop_stale_frida_server(self) -> bool:
+        """Stop frida-server processes that exist but are not ready.
+
+        :return: False only if such processes exist and could not be stopped.
+        """
+        pids = self._safe_frida_server_pids()
+        if not pids:
+            return True
+        self.logger.warning(f"stale/unresponsive frida-server (pids {pids}) -- restarting")
+        if self.stop_frida_server():
+            return True
+        self.logger.error(f"Could not stop stale frida-server (pids {pids}); not starting a new one")
+        return False
+
+
+    def _frida_server_binary_exists(self, frida_bin: str) -> bool:
+        """Return True iff *frida_bin* exists and is executable (root ``test -x``)."""
+        try:
+            result = self.adb.root_shell(f'test -x "{frida_bin}" && echo ok')
+        except Exception as e:
+            self.logger.debug(f"frida-server binary check failed: {e}")
+            return False
+        return (result.stdout or "").strip() == "ok"
+
+
+    def _build_frida_server_launcher(self, frida_bin: str) -> str:
+        """Return the quote-free one-liner that runs the zygote-env launcher.
+
+        frida-server 17.x boots an ART/Dalvik runtime at startup
+        (JNI_CreateJavaVM). On Android 14+ ART aborts (SIGABRT) unless the
+        environment init hands to zygote is present -- BOOTCLASSPATH,
+        DEX2OATBOOTCLASSPATH and the ANDROID_* roots -- which a bare adb/su
+        shell does not inherit. The launcher forwards zygote's environment,
+        unsets inherited ANDROID_SOCKET_* vars (e.g. ANDROID_SOCKET_adbd leaks
+        in from adbd), writes a launch marker to the log and execs
+        frida-server. It is delivered base64-encoded so the command survives
+        every su/elevation wrapper unchanged and nothing extra is written to
+        the device filesystem.
+        """
         launcher = f"""ZPID=$(pidof zygote64 || pidof zygote)
 if [ -n "$ZPID" ]; then
   while IFS= read -r line; do
@@ -198,104 +261,215 @@ if [ -n "$ZPID" ]; then
 $(tr '\\0' '\\n' < /proc/$ZPID/environ)
 EOF
 fi
-exec {frida_bin}
+for v in $(env | sed -n 's/^\\(ANDROID_SOCKET_[A-Za-z0-9_]*\\)=.*/\\1/p'); do
+  unset "$v"
+done
+echo "{self.FRIDA_SERVER_LAUNCH_MARKER} $(date) ==="
+exec {frida_bin} </dev/null
 """
         b64 = base64.b64encode(launcher.encode()).decode()
-        frida_cmd = f"echo {b64} | base64 -d | sh"
+        return f"echo {b64} | base64 -d | sh"
 
+
+    def _launch_frida_server(self, frida_bin: str) -> bool:
+        """Launch frida-server; return True if its output goes to the log file.
+
+        The launch is fully detached (setsid + nohup, stdio -> log file and
+        /dev/null). Device experiments showed that a server whose stdout/stderr
+        are adbd sockets (the old Popen-of-``adb shell`` launch) dies from
+        SIGPIPE on its next write once the host adb client goes away
+        (``adb kill-server``, USB replug). Readiness is confirmed separately
+        via :meth:`_wait_until_frida_ready`.
+        """
+        frida_cmd = self._build_frida_server_launcher(frida_bin)
+        if self._device_supports_detached_launch():
+            result = self.adb.root_detached_shell(frida_cmd, self.frida_server_log_path)
+            if getattr(result, "returncode", 0):
+                self.logger.debug(f"detached launch returned {result.returncode}: {result.stderr}")
+            return True
+        self.logger.warning(
+            "setsid/nohup not available on the device -- falling back to the legacy "
+            "background launch (frida-server may die when the adb connection drops)"
+        )
+        self.adb.root_background_shell(frida_cmd)
+        return False
+
+
+    def _device_supports_detached_launch(self) -> bool:
+        """Return True iff ``setsid`` and ``nohup`` exist on the device."""
         try:
-            process = self.adb.root_background_shell(frida_cmd)
-            # Give it a moment to start and potentially fail
-            time.sleep(1)
-
-            # Check if process failed immediately
-            if process.poll() is not None:
-                _, stderr_text = process.communicate()
-                if stderr_text and "Address already in use" in stderr_text:
-                    self.logger.info("[*] frida-server is already running on the device")
-                    return True
-                elif stderr_text and stderr_text.strip():
-                    self.logger.error(f"Failed to start frida-server: {stderr_text.strip()}")
-                    return False
-                else:
-                    self.logger.error(
-                        "frida-server exited immediately with no output -- likely an "
-                        "ART/SIGABRT crash on startup; check `adb logcat` for a tombstone"
-                    )
-                    return False
-            else:
-                if self.verbose:
-                    self.logger.info("[*] frida-server started successfully in background")
-
-            # The process exists, but device.spawn()/attach() fails with
-            # frida-core's "need Gadget to attach on jailed Android" fallback
-            # if the control socket is not accepting connections yet. Wait
-            # until the frida CLIENT can actually reach the server, not just
-            # until pidof finds the process.
-            if self._wait_until_frida_ready():
-                if self.verbose:
-                    self.logger.info("[*] frida-server is ready (client can attach)")
-                return True
-            else:
-                self.logger.error(
-                    "frida-server process is up but the frida client could not "
-                    "reach it in time (control socket not ready)"
-                )
-                return False
-
+            result = self.adb.root_shell(
+                "command -v setsid >/dev/null && command -v nohup >/dev/null && echo ok"
+            )
         except Exception as e:
-            self.logger.error(f"Error starting frida-server: {e}")
+            self.logger.debug(f"setsid availability check failed: {e}")
+            return False
+        return (result.stdout or "").strip() == "ok"
+
+
+    def _read_frida_server_log_tail(self, n: int = 20) -> str:
+        """Return the last *n* lines of the frida-server log from the latest launch.
+
+        Lines up to and including the most recent launch marker are dropped,
+        since the log is appended to across launches. Returns "" if the log
+        cannot be read.
+        """
+        try:
+            result = self.adb.root_shell(f'tail -n {int(n)} "{self.frida_server_log_path}"')
+        except Exception as e:
+            self.logger.debug(f"Could not read frida-server log: {e}")
+            return ""
+        lines = (result.stdout or "").splitlines()
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].startswith(self.FRIDA_SERVER_LAUNCH_MARKER):
+                lines = lines[i + 1:]
+                break
+        return "\n".join(lines).strip()
+
+
+    def _report_frida_server_start_failure(self, logged: bool = True) -> None:
+        """Log why a launched frida-server never became ready."""
+        tail = self._read_frida_server_log_tail() if logged else ""
+        if "Address already in use" in tail:
+            self.logger.error(
+                "frida-server could not bind 127.0.0.1:27042 (Address already in use) "
+                "and no ready frida-server answers: another process holds the port "
+                "(a hung instance, or a server not named 'frida-server'). "
+                "Find it with `adb shell su -c 'netstat -tlnp'` and stop it."
+            )
+            return
+        details = f"; log ({self.frida_server_log_path}):\n{tail}" if tail else ""
+        self.logger.error(
+            "frida-server did not become ready within 15s (frida client cannot attach)"
+            f"{details}\nHint: check `adb logcat` for an ART/SIGABRT tombstone."
+        )
+
+
+    def _get_fresh_frida_device(self, timeout: int = 2):
+        """Return a newly looked-up frida Device (remote socket / serial / usb).
+
+        A fresh lookup avoids reusing a cached Device whose transport went
+        stale across a frida-server restart.
+
+        :param timeout: Seconds frida may wait for the device to appear.
+        :type timeout: int
+        :return: Frida Device object
+        """
+        if self.is_remote and self.device_socket:
+            return frida.get_device_manager().add_remote_device(self.device_socket)
+        if self._device_serial:
+            return frida.get_device(self._device_serial, timeout=timeout)
+        return frida.get_usb_device(timeout=timeout)
+
+
+    def is_frida_server_ready(self) -> bool:
+        """Return True iff a root frida-server is reachable and usable.
+
+        Frida 17 trap: with NO frida-server running, the USB device still
+        answers ``enumerate_processes()`` (full ADB process list) and
+        ``query_system_parameters()`` through an ADB fallback -- the latter
+        reports ``'access': 'jailed'``, and ``attach()``/``spawn()`` then fail
+        with ``ServerNotRunningError``. So "enumerate succeeds" is a false
+        positive. A real root frida-server reports ``'access': 'full'``.
+
+        Older frida versions omit the ``access`` key; there a successful
+        ``enumerate_processes()`` is the best available signal. Any exception
+        means "not ready".
+
+        :return: True if the client can attach/spawn through frida-server.
+        :rtype: bool
+        """
+        try:
+            device = self._get_fresh_frida_device()
+            params = device.query_system_parameters()
+            if "access" in params:
+                return params["access"] == "full"
+            device.enumerate_processes()
+            return True
+        except Exception as e:
+            self.logger.debug(f"frida readiness probe failed: {e}")
             return False
 
 
     def _wait_until_frida_ready(self, timeout: float = 15.0, interval: float = 0.5) -> bool:
-        """Block until the frida CLIENT can actually reach frida-server.
+        """Block until the frida CLIENT can actually use frida-server.
 
-        ``is_frida_server_running()`` only confirms the *process* exists (via
-        ``pidof``). ``device.spawn()``/``attach()`` raise frida-core's
-        "need Gadget to attach on jailed Android" fallback when called before
-        the server's control socket is ready. Probe ``enumerate_processes()``
-        in a retry loop so callers can spawn/attach immediately after a start.
+        ``is_frida_server_running()`` only confirms a frida-server *process*
+        exists. That is not enough: the control socket may not accept
+        connections yet, and on frida 17 ``enumerate_processes()`` succeeds
+        even with no server at all (ADB fallback, ``access: jailed``). Poll
+        :meth:`is_frida_server_ready` until it reports ``access: full`` so
+        callers can spawn/attach immediately after a start.
 
         :param timeout: Maximum seconds to wait for client reachability.
         :type timeout: float
         :param interval: Seconds between probes.
         :type interval: float
-        :return: True if the client reached the server within *timeout*.
+        :return: True if the server became ready within *timeout*.
         :rtype: bool
         """
         deadline = time.time() + timeout
-        last_err = None
         while time.time() < deadline:
-            try:
-                if self.is_remote and self.device_socket:
-                    device = frida.get_device_manager().add_remote_device(
-                        self.device_socket
-                    )
-                elif self._device_serial:
-                    device = frida.get_device(self._device_serial, timeout=2)
-                else:
-                    device = frida.get_usb_device(timeout=2)
-                device.enumerate_processes()
+            if self.is_frida_server_ready():
                 return True
-            except Exception as e:
-                last_err = e
-                time.sleep(interval)
-        if last_err is not None:
-            self.logger.debug(f"frida readiness probe failed: {last_err}")
+            time.sleep(interval)
         return False
+
+
+    def _frida_server_pids(self) -> List[int]:
+        """Return pids of every process whose name starts with ``frida-server``.
+
+        Matches versioned binaries such as ``frida-server-17.18.0-android-arm64``
+        that ``pidof frida-server`` / ``killall frida-server`` miss. Uses a root
+        shell when available (non-root ``ps`` may hide root processes).
+
+        :return: List of matching pids (possibly empty).
+        :rtype: List[int]
+        :raises Exception: Propagates ADB errors so callers can fall back.
+        """
+        cmd = "ps -A -o PID,NAME"
+        run = self.adb.root_shell if self.is_device_rooted else self.adb.shell
+        return self._parse_frida_server_pids(run(cmd).stdout or "")
+
+
+    @staticmethod
+    def _parse_frida_server_pids(ps_output: str) -> List[int]:
+        """Parse ``ps -o PID,NAME`` output; skip header, blanks and junk."""
+        pids = []
+        for line in ps_output.splitlines():
+            fields = line.split(None, 1)
+            if len(fields) != 2 or not fields[0].isdigit():
+                continue
+            name = fields[1].strip().rsplit("/", 1)[-1]
+            if name.startswith("frida-server"):
+                pids.append(int(fields[0]))
+        return pids
 
 
     def is_frida_server_running(self) -> bool:
         """
-        Checks if on the connected device a frida server is running.
+        Checks if on the connected device a frida-server *process* exists.
 
-        This method first tries non-root commands, then falls back to root commands
-        if available. Safe to call on non-rooted devices (returns False).
+        Matches versioned binary names (``frida-server-17.18.0-android-arm64``)
+        via :meth:`_frida_server_pids`; falls back to the legacy
+        ``pidof``/``ps | grep`` probes if that helper fails. Safe to call on
+        non-rooted devices (returns False).
 
-        :return: True if a frida-server is running otherwise False.
+        NOTE: this does NOT prove the server is usable (socket ready, root
+        access). Use :meth:`is_frida_server_ready` for that.
+
+        :return: True if a frida-server process is running otherwise False.
         :rtype: bool
         """
+        try:
+            return bool(self._frida_server_pids())
+        except Exception as e:
+            self.logger.debug(f"ps-based frida-server lookup failed, using fallback: {e}")
+            return self._is_frida_server_running_legacy()
+
+
+    def _is_frida_server_running_legacy(self) -> bool:
+        """Legacy pidof / ps|grep probes (fallback for is_frida_server_running)."""
         try:
             # Method 1: Try pidof without root (works on some devices)
             result = self.adb.shell("pidof frida-server")
@@ -364,11 +538,55 @@ exec {frida_bin}
             return []
 
 
-    def stop_frida_server(self):
-        if self.is_device_rooted:
-            self.adb.root_shell("/system/bin/killall frida-server")
-        else:
+    def stop_frida_server(self) -> bool:
+        """Stop every frida-server process (including versioned binary names).
+
+        Sends ``killall frida-server`` (compatibility), then ``kill`` to every
+        pid from :meth:`_frida_server_pids`, and waits until none remain
+        (escalating to ``kill -9``).
+
+        :return: True if no frida-server process remains, False otherwise
+            (also False on a non-rooted device).
+        :rtype: bool
+        """
+        if not self.is_device_rooted:
             self.logger.warning("Cannot stop frida-server: device not rooted")
+            return False
+        self.adb.root_shell("/system/bin/killall frida-server")
+        self._kill_pids(self._safe_frida_server_pids() or [])
+        return self._wait_for_frida_server_exit()
+
+
+    def _safe_frida_server_pids(self) -> Optional[List[int]]:
+        """:meth:`_frida_server_pids`, or None if the lookup failed."""
+        try:
+            return self._frida_server_pids()
+        except Exception as e:
+            self.logger.debug(f"frida-server pid lookup failed: {e}")
+            return None
+
+
+    def _kill_pids(self, pids: List[int], force: bool = False) -> None:
+        """Send SIGTERM (or SIGKILL when *force*) to *pids* via a root shell."""
+        if not pids:
+            return
+        flag = "-9 " if force else ""
+        self.adb.root_shell(f"kill {flag}{' '.join(str(p) for p in pids)}")
+
+
+    def _wait_for_frida_server_exit(self, timeout: float = 5.0, escalate_after: float = 3.0,
+                                    step: float = 0.25) -> bool:
+        """Poll until no frida-server pid remains; ``kill -9`` after *escalate_after*."""
+        escalate_at = int(escalate_after / step)
+        for i in range(int(timeout / step) + 1):
+            pids = self._safe_frida_server_pids()
+            if pids == []:
+                return True
+            if i == escalate_at and pids:
+                self.logger.debug(f"frida-server still alive, sending SIGKILL to {pids}")
+                self._kill_pids(pids, force=True)
+            time.sleep(step)
+        return False
 
 
     def is_process_alive(self, pid: int) -> bool:
@@ -382,14 +600,18 @@ exec {frida_bin}
 
         A wedged/unreachable frida-server (transport/protocol error) is itself
         "not confirmed alive", so this returns False rather than raising — the
-        caller can then decide whether to recover the server. Mirrors the probe
-        style of :meth:`_wait_until_frida_ready`.
+        caller can then decide whether to recover the server. Readiness is
+        checked first via :meth:`is_frida_server_ready`, because on frida 17
+        ``enumerate_processes()`` answers via an ADB fallback even when no
+        frida-server runs (``access: jailed``).
 
         :param pid: The process id to check.
         :type pid: int
         :return: True if *pid* is currently enumerated by frida-server.
         :rtype: bool
         """
+        if not self.is_frida_server_ready():
+            return False
         try:
             device = self.get_frida_device()
             for proc in device.enumerate_processes():
@@ -406,24 +628,21 @@ exec {frida_bin}
     def restart_frida_server_and_wait(self, timeout: float = 15.0) -> bool:
         """Stop then start frida-server, blocking until the client can reach it.
 
-        Recovery primitive for a wedged/crashed frida-server: ``stop`` then
-        ``run`` (which already blocks on :meth:`_wait_until_frida_ready`).
-        ``stop_frida_server`` only sends ``killall`` (asynchronous), so settle
-        briefly before the restart — otherwise ``run_frida_server`` may see the
-        still-dying pid via ``is_frida_server_running`` and early-return without
-        actually restarting. The *timeout* is honoured for the final
+        Recovery primitive for a wedged/crashed frida-server. ``stop`` already
+        waits until no frida-server process remains, so ``run`` starts a fresh
+        instance immediately. The *timeout* is honoured for the final
         client-reachability confirmation (on the normal success path
         ``run_frida_server`` has already confirmed readiness, so it returns
-        promptly; it matters when the internal "already running" early-return
-        skipped the probe).
+        promptly).
 
         :param timeout: Max seconds to wait for client reachability after start.
         :type timeout: float
         :return: True if frida-server came back up and the client can reach it.
         :rtype: bool
         """
-        self.stop_frida_server()
-        time.sleep(1)
+        if not self.stop_frida_server():
+            self.logger.error("Could not stop frida-server; not restarting")
+            return False
         if not self.run_frida_server():
             return False
         return self._wait_until_frida_ready(timeout=timeout)
@@ -478,6 +697,7 @@ exec {frida_bin}
                 self.logger.info(f"[*] downloading frida-server to {dir}")
             file_path = self.download_frida_server(dir,version)
             tmp_frida_server = self.extract_frida_server_comp(file_path)
+            self._stop_running_server_before_replace()
             # ensure's that we always overwrite the current installation with our recent downloaded version
             self._adb_remove_file_if_exist(frida_dir + "frida-server")
             if self.verbose:
@@ -485,6 +705,14 @@ exec {frida_bin}
             self.adb.push(tmp_frida_server, frida_dir)
             self.make_frida_server_executable()
             return True
+
+
+    def _stop_running_server_before_replace(self) -> None:
+        """Stop a running frida-server so it doesn't keep running from a deleted inode."""
+        pids = self._safe_frida_server_pids()
+        if pids:
+            self.logger.info(f"Stopping running frida-server (pids {pids}) before replacing the binary")
+            self.stop_frida_server()
 
 
     # by default the frida-server version matching the host package is downloaded
@@ -592,6 +820,27 @@ exec {frida_bin}
         self.adb.root_shell(final_cmd)
 
 
+    def get_device_arch(self) -> str:
+        """Public alias of :meth:`_get_android_device_arch` (frida arch name, e.g. ``arm64``)."""
+        return self._get_android_device_arch()
+
+
+    def get_frida_server_status(self) -> Dict[str, object]:
+        """Summarise frida-server state on the device.
+
+        :return: ``{"process": bool, "ready": bool, "installed_version": Optional[str]}``
+            -- *process*: a frida-server process exists; *ready*: the client can
+            attach/spawn (``access: full``); *installed_version*: version of the
+            binary at the install destination, or None.
+        :rtype: Dict[str, object]
+        """
+        return {
+            "process": self.is_frida_server_running(),
+            "ready": self.is_frida_server_ready(),
+            "installed_version": self.get_installed_server_version(),
+        }
+
+
     def _get_android_device_arch(self) -> str:
         """Get the architecture of the target Android device."""
         try:
@@ -643,55 +892,67 @@ exec {frida_bin}
                 self.adb.shell(f'rm "{path}"')
 
 
+def _print_device_list() -> None:
+    """Print connected ADB devices as a table."""
+    devices = FridaManager.get_connected_devices()
+    if not devices:
+        print("No devices connected")
+        return
+    print(f"{'Serial':<20} {'Type':<10} {'State':<12} {'Model'}")
+    print("-" * 60)
+    for d in devices:
+        print(f"{d['serial']:<20} {d['type']:<10} {d['state']:<12} {d['model']}")
+
+
+def _report_status(afm_obj: "FridaManager") -> int:
+    """Log frida-server status; return exit code 0 only if the server is ready."""
+    status = afm_obj.get_frida_server_status()
+    afm_obj.logger.info(f"[*] frida-server process running: {'yes' if status['process'] else 'no'}")
+    afm_obj.logger.info(f"[*] frida-server ready (client can attach): {'yes' if status['ready'] else 'no'}")
+    afm_obj.logger.info(f"[*] installed frida-server version: {status['installed_version'] or 'not installed'}")
+    return 0 if status["ready"] else 1
+
+
+def _install_and_run(afm_obj: "FridaManager") -> int:
+    """Install the pinned frida-server and start it; return the exit code."""
+    afm_obj.install_frida_server()
+    if afm_obj.run_frida_server():
+        version = afm_obj.get_installed_server_version() or frida.__version__
+        afm_obj.logger.info(f"[*] successfully installed and launched frida-server {version} on Android device")
+        return 0
+    afm_obj.logger.error("[-] unable to run frida-server on Android device")
+    return 1
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description='FridaManager initialization parameters.')
+    parser.add_argument('--is_remote', type=lambda x: (str(x).lower() == 'true'), default=False, help='Whether to use Frida in remote mode. Default is False.')
+    parser.add_argument('--socket', type=str, default="", help='Socket to use for the connection. Expected in the format <ip:port>.')
+    parser.add_argument('--verbose', required=False, action="store_const", const=True, default=False, help='Enable verbose output. Default is False.')
+    parser.add_argument('--frida_install_dst', type=str, default="/data/local/tmp/", help='Frida installation destination. Default is "/data/local/tmp/".')
+    parser.add_argument('-r','--is_running', required=False, action="store_const", const=True, default=False, help='Print frida-server status (process / ready / installed version). Exits 0 only if the server is ready for the frida client.')
+    parser.add_argument('-d', '--device', type=str, default=None, help='Target device serial (e.g., emulator-5554). Auto-selects if not specified.')
+    parser.add_argument('-l', '--list-devices', required=False, action="store_const", const=True, default=False, help='List all connected devices and exit.')
+    parser.add_argument('--adb-root', required=False, action="store_const", const=True, default=False, help='Use "adb root" to restart adbd as root before trying su escalation (useful on emulators and eng/userdebug builds).')
+    return parser
+
+
 def main():
     if len(sys.argv) > 1:
-        parser = argparse.ArgumentParser(description='FridaManager initialization parameters.')
+        args = _build_arg_parser().parse_args()
 
-        parser.add_argument('--is_remote', type=lambda x: (str(x).lower() == 'true'), default=False, help='Whether to use Frida in remote mode. Default is False.')
-        parser.add_argument('--socket', type=str, default="", help='Socket to use for the connection. Expected in the format <ip:port>.')
-        parser.add_argument('--verbose', required=False, action="store_const", const=True, default=False, help='Enable verbose output. Default is False.')
-        parser.add_argument('--frida_install_dst', type=str, default="/data/local/tmp/", help='Frida installation destination. Default is "/data/local/tmp/".')
-        parser.add_argument('-r','--is_running', required=False, action="store_const", const=True, default=False, help='Checks only if frida-server is running on the Android device or not.')
-        parser.add_argument('-d', '--device', type=str, default=None, help='Target device serial (e.g., emulator-5554). Auto-selects if not specified.')
-        parser.add_argument('-l', '--list-devices', required=False, action="store_const", const=True, default=False, help='List all connected devices and exit.')
-        parser.add_argument('--adb-root', required=False, action="store_const", const=True, default=False, help='Use "adb root" to restart adbd as root before trying su escalation (useful on emulators and eng/userdebug builds).')
-
-        args = parser.parse_args()
-
-        # List devices mode
         if args.list_devices:
-            devices = FridaManager.get_connected_devices()
-            if not devices:
-                print("No devices connected")
-            else:
-                print(f"{'Serial':<20} {'Type':<10} {'State':<12} {'Model'}")
-                print("-" * 60)
-                for d in devices:
-                    print(f"{d['serial']:<20} {d['type']:<10} {d['state']:<12} {d['model']}")
+            _print_device_list()
             sys.exit(0)
 
-        if args.is_running:
-            afm_obj = FridaManager(device_serial=args.device, prefer_adb_root=args.adb_root)
-            if afm_obj.is_frida_server_running():
-                afm_obj.logger.info("[*] frida-server is running on Android device")
-            else:
-                afm_obj.logger.info("[*] frida-server is not running on Android device")
-
-            sys.exit()
-
-
-
         afm_obj = FridaManager(args.is_remote, args.socket, args.verbose, args.frida_install_dst, device_serial=args.device, prefer_adb_root=args.adb_root)
+
+        if args.is_running:
+            sys.exit(_report_status(afm_obj))
     else:
         afm_obj = FridaManager()
 
-    afm_obj.install_frida_server()
-    afm_obj.run_frida_server()
-    result = afm_obj.is_frida_server_running()
-    if result:
-        afm_obj.logger.info("[*] succesfull installed and launched latest frida-server version on Android device")
-    else:
-        afm_obj.logger.error("[-] unable to run frida-server on Android device")
+    sys.exit(_install_and_run(afm_obj))
 
 
 if __name__ == "__main__":

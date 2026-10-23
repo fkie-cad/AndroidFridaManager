@@ -1,4 +1,4 @@
-![version](https://img.shields.io/badge/version-2.0.5-blue) [![PyPI version](https://badge.fury.io/py/AndroidFridaManager.svg)](https://badge.fury.io/py/AndroidFridaManager) [![Publish status](https://github.com/fkie-cad/friTap/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/AndroidFridaManager/actions/workflows/publish-to-pypi.yml)
+![version](https://img.shields.io/badge/version-2.0.6-blue) [![PyPI version](https://badge.fury.io/py/AndroidFridaManager.svg)](https://badge.fury.io/py/AndroidFridaManager) [![Publish status](https://github.com/fkie-cad/friTap/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/AndroidFridaManager/actions/workflows/publish-to-pypi.yml)
 
 # AndroidFridaManager
 
@@ -32,11 +32,16 @@ In order to easily install the latest frida-server version to your Android devic
 $ afrim 
 ```
 
-In order to check only if frida-server is running invoke it with the `-r`-parameter:
+In order to check the frida-server status invoke it with the `-r`-parameter:
 
 ```bash
-$ afrim -r
+$ afrim -r                      # first auto-selected device
+$ afrim -r -d emulator-5554     # specific device
 ```
+
+It prints whether a frida-server process exists, whether it is *ready* (the frida client can attach/spawn through it) and the installed frida-server version. The exit code is `0` only if the server is ready and non-zero otherwise, so it can be used in scripts (`afrim -r && frida -U ...`). `-d/--device`, `--frida_install_dst` and `--adb-root` are honoured.
+
+Without `-r`, `afrim` installs the frida-server version matching your host `frida` package and starts it; the exit code is `0` only if the server ended up ready.
 
 
 ## API Usage
@@ -95,12 +100,26 @@ install_frida_server(dst_dir=None, version=None)
     # version=None auto-matches host frida package version;
     # pass "latest" for newest GitHub release, or a specific version string
 
-run_frida_server(frida_server_path=None)
-    # waits until the frida client can actually reach the server (up to 15s)
+run_frida_server(frida_server_path=None)   # -> bool
+    # no-op (True) if a ready server already exists; restarts a stale/unresponsive
+    # one; fails (False) if the binary is missing. Launches frida-server fully
+    # detached from adb (setsid + nohup, stdio -> log file), so it survives
+    # `adb kill-server`, USB replugs and the host adb client going away. Its
+    # output is appended to <frida_install_dst>frida-server.log
+    # (default /data/local/tmp/frida-server.log). Waits up to 15s until the frida
+    # client can actually use the server; on failure the log tail is reported.
 
-is_frida_server_running()
-stop_frida_server()
+is_frida_server_ready()      # True iff the frida client can attach/spawn (access == "full")
+is_frida_server_running()    # True iff a frida-server *process* exists (also versioned
+                             # names like frida-server-17.x-android-arm64); does NOT
+                             # prove the server is usable -- prefer is_frida_server_ready()
+get_frida_server_status()    # {"process": bool, "ready": bool, "installed_version": str|None}
+stop_frida_server()          # -> bool; kills every frida-server process and waits until
+                             # none remain (escalates to SIGKILL)
+restart_frida_server_and_wait(timeout=15.0)   # stop + run; True once ready
+is_process_alive(pid)        # True iff pid is enumerated by a ready frida-server
 remove_frida_server()
+get_device_arch()            # frida arch name of the device, e.g. "arm64"
 
 get_installed_server_version()       # returns version string from device, or None
 list_available_versions(limit=15)    # fetches recent release tags from GitHub
@@ -108,6 +127,8 @@ list_available_versions(limit=15)    # fetches recent release tags from GitHub
 get_connected_devices()              # classmethod — list ADB devices
 get_frida_devices()                  # classmethod — list Frida-visible devices
 ```
+
+> **Frida 17 "jailed" fallback:** with *no* frida-server running, a frida 17 USB device still answers `enumerate_processes()` and `query_system_parameters()` through an ADB fallback (reporting `access: "jailed"`), while `attach()`/`spawn()` then fail (e.g. "need Gadget to attach on jailed Android"). "Enumerating processes works" is therefore not proof of a running server. `is_frida_server_ready()` only returns True for `access: "full"`, and `run_frida_server()` / `afrim -r` use that check.
 
 ### JobManager
 

@@ -39,6 +39,26 @@ class ADB:
     def _elevate_background(self, cmd: str) -> str:
         raise ValueError("Device is not rooted")
 
+    def _elevate_detached(self, detached_cmd: str) -> str:
+        """Wrap an already-detached command line (see :meth:`detached_command`)."""
+        raise ValueError("Device is not rooted")
+
+    @staticmethod
+    def _single_quote_escape(cmd: str) -> str:
+        """Escape *cmd* for embedding inside a single-quoted shell string."""
+        return cmd.replace("'", "'\\''")
+
+    @staticmethod
+    def detached_command(cmd: str, log_path: str) -> str:
+        """Return *cmd* fully detached from the adb session.
+
+        ``setsid`` drops the controlling session, ``nohup`` ignores SIGHUP and
+        stdio is redirected to *log_path* (appended, never truncated) and
+        ``/dev/null``, so no adbd socket is inherited. *cmd* must not contain
+        double quotes.
+        """
+        return f'setsid nohup sh -c "{cmd}" >>{log_path} 2>&1 </dev/null &'
+
     # ── shell commands ───────────────────────────────────────────────
 
     def shell(self, cmd: str, timeout: int = 5) -> subprocess.CompletedProcess:
@@ -57,6 +77,16 @@ class ADB:
             start_new_session=True,
             text=True,
         )
+
+    def root_detached_shell(self, cmd: str, log_path: str,
+                            timeout: int = 30) -> subprocess.CompletedProcess:
+        """Run *cmd* as root fully detached from adb (output appended to *log_path*).
+
+        Unlike :meth:`root_background_shell` this is a normal blocking call:
+        the remote shell returns as soon as the detached child is forked.
+        """
+        detached = self.detached_command(cmd, log_path)
+        return self._run(["shell", self._elevate_detached(detached)], timeout=timeout)
 
     # ── file transfer ────────────────────────────────────────────────
 
@@ -238,6 +268,9 @@ class RootADB(ADB):
     def _elevate_background(self, cmd: str) -> str:
         return f"{cmd} &"
 
+    def _elevate_detached(self, detached_cmd: str) -> str:
+        return detached_cmd
+
     @property
     def is_rooted(self) -> bool:
         return True
@@ -251,6 +284,9 @@ class SuADB(ADB):
 
     def _elevate_background(self, cmd: str) -> str:
         return f'su 0 sh -c "{cmd} &"'
+
+    def _elevate_detached(self, detached_cmd: str) -> str:
+        return f"su 0 sh -c '{self._single_quote_escape(detached_cmd)}'"
 
     @property
     def is_rooted(self) -> bool:
@@ -266,6 +302,9 @@ class MagiskADB(ADB):
 
     def _elevate_background(self, cmd: str) -> str:
         return f"""su -c 'sh -c "{cmd} &"'"""
+
+    def _elevate_detached(self, detached_cmd: str) -> str:
+        return self._elevate(detached_cmd)
 
     @property
     def is_rooted(self) -> bool:
