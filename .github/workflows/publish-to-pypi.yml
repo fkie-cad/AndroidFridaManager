@@ -13,6 +13,9 @@ jobs:
   build-and-publish:
     # Pinned instead of ubuntu-latest so runner image migrations cannot silently break the job
     runs-on: ubuntu-24.04
+    # Needed to push the release tag and create the GitHub release
+    permissions:
+      contents: write
 
     steps:
     - name: Checkout code
@@ -32,6 +35,10 @@ jobs:
     - name: Build package
       run: python -m build
 
+    - name: Read version
+      id: version
+      run: echo "version=$(python -c "exec(open('AndroidFridaManager/about.py').read()); print(__version__)")" >> "$GITHUB_OUTPUT"
+
     - name: Check distribution
       run: twine check dist/*
 
@@ -39,3 +46,19 @@ jobs:
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
         password: ${{ secrets.PYPI_API_TOKEN }}
+        # Lets a manual re-run get past an already uploaded version to the tagging step
+        skip-existing: true
+
+    # Tag only after a successful PyPI upload, so every tag corresponds to a published package
+    - name: Create tag and GitHub release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        TAG="v$VERSION"
+        if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+          echo "$TAG already exists, skipping"
+        else
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" \
+            --title "AndroidFridaManager $VERSION" --generate-notes
+        fi
