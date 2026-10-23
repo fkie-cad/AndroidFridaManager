@@ -44,7 +44,9 @@ setup(
 
     author=__author__,
     author_email="daniel.baier@fkie.fraunhofer.de",
-    license='GPL v3',
+    # SPDX license expression (PEP 639); replaces the deprecated license classifier
+    license='GPL-3.0-only',
+    license_files=['LICENSE'],
 
      # include other files
      #package_data={
@@ -61,7 +63,6 @@ setup(
 
 
     classifiers=[
-        "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
         "Operating System :: OS Independent",
         "Natural Language :: English",
         "Programming Language :: Python :: 3 :: Only",
