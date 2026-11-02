@@ -15,6 +15,14 @@ import tempfile
 import argparse
 from typing import Optional, List, Dict
 from .adb import ADB, RootADB, SuADB, MagiskADB
+from .server_download import (
+    HTTP_TIMEOUT,
+    MAX_DECOMPRESSED_BYTES,
+    decompress_xz_bounded,
+    download_verified,
+    resolve_allow_unverified,
+    resolve_server_asset,
+)
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
@@ -530,7 +538,7 @@ exec {frida_bin} </dev/null
         """
         url = "https://api.github.com/repos/frida/frida/releases"
         try:
-            res = requests.get(url, timeout=10, params={"per_page": limit})
+            res = requests.get(url, timeout=HTTP_TIMEOUT, params={"per_page": limit})
             res.raise_for_status()
             return [r["tag_name"] for r in res.json() if "tag_name" in r]
         except requests.RequestException as e:
@@ -655,7 +663,7 @@ exec {frida_bin} </dev/null
         self._adb_remove_file_if_exist(cmd)
 
 
-    def install_frida_server(self, dst_dir=None, version=None):
+    def install_frida_server(self, dst_dir=None, version=None, *, allow_unverified=None):
         """
         Install the frida server binary on the Android device.
         This includes downloading the frida-server, decompress it and pushing it to the Android device.
@@ -668,7 +676,11 @@ exec {frida_bin} </dev/null
             of the host ``frida`` Python package is used so that client and server
             stay in sync. Pass ``"latest"`` to pull the newest release from GitHub.
         :type version: string
+        :param allow_unverified: See :meth:`download_frida_server`.
+        :type allow_unverified: Optional[bool]
         :raises RuntimeError: If device is not rooted
+        :raises FridaServerVerificationError: If the download's SHA-256 digest is
+            missing or does not match (nothing is installed)
 
         """
         if version is None:
@@ -695,7 +707,7 @@ exec {frida_bin} </dev/null
         with tempfile.TemporaryDirectory() as dir:
             if self.verbose:
                 self.logger.info(f"[*] downloading frida-server to {dir}")
-            file_path = self.download_frida_server(dir,version)
+            file_path = self.download_frida_server(dir, version, allow_unverified=allow_unverified)
             tmp_frida_server = self.extract_frida_server_comp(file_path)
             self._stop_running_server_before_replace()
             # ensure's that we always overwrite the current installation with our recent downloaded version
@@ -716,18 +728,29 @@ exec {frida_bin} </dev/null
 
 
     # by default the frida-server version matching the host package is downloaded
-    def download_frida_server(self, path, version=None):
+    def download_frida_server(self, path, version=None, *, allow_unverified=None):
         """
         Downloads a frida server. By default the version matching the host
         ``frida`` Python package is used. Pass ``"latest"`` to fetch the
         newest release from GitHub, or a specific version string like
         ``"16.3.3"``.
 
+        The download is streamed (size-capped, with timeouts) and verified
+        against the SHA-256 ``digest`` GitHub records for the release asset.
+        It fails closed: without a digest (releases published before June
+        2025, or the GitHub API is unreachable) or on a mismatch, the file is
+        deleted and :class:`FridaServerVerificationError` is raised.
+
         :param path: The path where the compressed frida-server should be downloded.
         :type path: string
         :param version: The version. When *None* the host frida package version is
             used. Pass ``"latest"`` for the newest GitHub release.
         :type version: string
+        :param allow_unverified: Accept a download for which no digest is
+            available (a mismatch is never accepted). *None* (default) defers to
+            the ``AFM_ALLOW_UNVERIFIED_SERVER`` / ``FRITAP_ALLOW_UNVERIFIED_SERVER``
+            environment variables (``1`` enables it).
+        :type allow_unverified: Optional[bool]
 
         :return: The location of the downloaded frida server in its compressed form.
         :rtype: string
@@ -741,27 +764,26 @@ exec {frida_bin} </dev/null
                 version = "latest"
                 self.logger.warning("Could not detect host frida version, falling back to 'latest'")
 
-        url = self.get_frida_server_for_android_url(version)
-        with open(path+"/frida-server","wb") as fsb:
-            res = requests.get(url)
-            fsb.write(res.content)
-            if self.verbose:
-                self.logger.info(f"[*] writing frida-server to {path}")
+        asset = resolve_server_asset(version, self._get_android_arch_str())
+        if self.verbose:
+            self.logger.info(f"[*] frida-server download url: {asset.url}")
+            self.logger.info(f"[*] writing frida-server to {path}")
+        download_verified(asset, path + "/frida-server", resolve_allow_unverified(allow_unverified))
 
         return path+"/frida-server"
 
 
 
-    def extract_frida_server_comp(self, file_path):
+    def extract_frida_server_comp(self, file_path, *, max_bytes=MAX_DECOMPRESSED_BYTES):
+        """Decompress the downloaded .xz (aborting above *max_bytes*) and return the binary path."""
         if self.verbose:
             self.logger.info(f"[*] extracting {file_path} ...")
         # create a subdir for the specified filename
         frida_server_dir = file_path[:-3]
         os.makedirs(frida_server_dir)
-        with lzma.open(file_path, 'rb') as f:
-            decompressed_file = f.read()
-        with open(frida_server_dir+'/frida-server', 'wb') as f:
-            f.write(decompressed_file)
+        decompress_xz_bounded(file_path, frida_server_dir + '/frida-server', max_bytes)
+        # temp files are created 0600; adb push carries the mode over to the device
+        os.chmod(frida_server_dir + '/frida-server', 0o755)
 
         # del compressed file
         os.remove(file_path)
@@ -769,6 +791,12 @@ exec {frida_bin} </dev/null
 
 
     def get_frida_server_for_android_url(self, version):
+        download_url = self._get_frida_server_download_url(self._get_android_arch_str(),version)
+        return download_url
+
+
+    def _get_android_arch_str(self) -> str:
+        """Device arch as used in frida-server asset names (``arm64``, ``x86_64``, ...)."""
         arch = self._get_android_device_arch()
 
         if self.verbose:
@@ -778,9 +806,7 @@ exec {frida_bin} </dev/null
 
         if self.verbose:
             self.logger.info(f"[*] Android architecture string: {arch_str}")
-
-        download_url = self._get_frida_server_download_url(arch_str,version)
-        return download_url
+        return arch_str
 
 
     def _get_frida_server_download_url(self, arch, version):
@@ -790,7 +816,8 @@ exec {frida_bin} </dev/null
             url = "https://api.github.com/repos/frida/frida/releases/"+version
 
             try:
-                res = requests.get(url)
+                res = requests.get(url, timeout=HTTP_TIMEOUT)
+                res.raise_for_status()
             except requests.exceptions.RequestException as e:
                 self.logger.error(f"Error making request to {url}: {e}")
                 raise RuntimeError(f"Failed to fetch Frida release information: {e}")

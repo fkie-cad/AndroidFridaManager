@@ -1,4 +1,4 @@
-![version](https://img.shields.io/badge/version-2.0.6-blue) [![PyPI version](https://badge.fury.io/py/AndroidFridaManager.svg)](https://badge.fury.io/py/AndroidFridaManager) [![Publish status](https://github.com/fkie-cad/friTap/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/AndroidFridaManager/actions/workflows/publish-to-pypi.yml)
+![version](https://img.shields.io/badge/version-2.0.7-blue) [![PyPI version](https://badge.fury.io/py/AndroidFridaManager.svg)](https://badge.fury.io/py/AndroidFridaManager) [![Publish status](https://github.com/fkie-cad/friTap/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/AndroidFridaManager/actions/workflows/publish-to-pypi.yml)
 
 # AndroidFridaManager
 
@@ -96,9 +96,13 @@ job_manager.resume_app()
 FridaManager(is_remote=False, socket="", verbose=False, frida_install_dst="/data/local/tmp/",
              device_serial=None, adb=None)
 
-install_frida_server(dst_dir=None, version=None)
+install_frida_server(dst_dir=None, version=None, *, allow_unverified=None)
     # version=None auto-matches host frida package version;
-    # pass "latest" for newest GitHub release, or a specific version string
+    # pass "latest" for newest GitHub release, or a specific version string.
+    # The download is verified against the SHA-256 digest GitHub records for the
+    # release asset and fails closed (FridaServerVerificationError) without one.
+    # Releases published before June 2025 (frida < 17.1.0) have no digest: pass
+    # allow_unverified=True or set AFM_ALLOW_UNVERIFIED_SERVER=1 to install them.
 
 run_frida_server(frida_server_path=None)   # -> bool
     # no-op (True) if a ready server already exists; restarts a stale/unresponsive
